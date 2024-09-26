@@ -1,7 +1,7 @@
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t, varmap_to_vars
-using ProfileView
+# using ProfileView
 
 @mtkmodel Pendulum begin
     @parameters begin
@@ -26,8 +26,7 @@ end
 mtk_model = complete(mtk_model)
 
 function generate_f_h(model, inputs, outputs)
-    ProfileView.@profview (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs, split=false; outputs=outputs)
-    @assert false
+    @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs; outputs=outputs, split=false)
     any(ModelingToolkit.is_alg_equation, equations(io_sys)) && error("Systems with algebraic equations are not supported")
     h_ = ModelingToolkit.build_explicit_observed_function(io_sys, outputs; inputs = inputs)
     nx = length(dvs)

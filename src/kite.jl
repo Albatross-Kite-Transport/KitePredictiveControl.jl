@@ -1,8 +1,11 @@
+# module Kite
+
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t
 using KiteModels
-using ProfileView
+# using JuliaSimCompiler
+# using Profile
 
 
 # set_data_path(joinpath(pwd(), "data"))
@@ -10,17 +13,20 @@ kite::KPS4_3L = KPS4_3L(KCU(se("system_3l.yaml")))
 kite.torque_control = true
 pos, vel = init_pos_vel(kite)
 kite_model, inputs = KiteModels.model!(kite, pos, vel)
+outputs = [kite_model.pos[2, kite.num_A]]
 
-inputs, outputs = inputs, [kite_model.pos[2, kite.num_A]]
+@time ModelingToolkit.structural_simplify(kite_model, (inputs, []); split=false)
+precompile(generate_control_function, (typeof(kite_model), typeof(inputs); typeof(outputs), Bool))
+@time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(kite_model, inputs; outputs=outputs, split=false)
 
 function generate_f_h(model, inputs, outputs)
     println("generate_control_function")
-    ProfileView.@profview (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs, split=false, simplify=true; outputs=outputs)
+    @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs; outputs=outputs, split=false)
     any(ModelingToolkit.is_alg_equation, equations(io_sys)) && error("Systems with algebraic equations are not supported")
     @time h_ = ModelingToolkit.build_explicit_observed_function(io_sys, outputs; inputs = inputs)
     nx = length(dvs)
     vx = string.(dvs)
-    @show par = varmap_to_vars(defaults(io_sys), psym)
+    @show par = ModelingToolkit.varmap_to_vars(defaults(io_sys), psym)
     function f!(dx, x, u, _)
         f_ip(dx, x, u, par, 1)
         nothing
@@ -64,3 +70,6 @@ display(plot(res_ry))
 
 res_yd = sim!(nmpc, N, [180.0], plant=plant, x_0=[π, 0], x̂_0=[π, 0, 0], y_step=[10])
 display(plot(res_yd))
+
+
+# end
