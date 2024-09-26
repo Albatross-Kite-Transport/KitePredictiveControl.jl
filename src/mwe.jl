@@ -1,6 +1,8 @@
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t, varmap_to_vars
+using Serialization
+
 # using ProfileView
 
 @mtkmodel Pendulum begin
@@ -25,10 +27,22 @@ end
 @named mtk_model = Pendulum()
 mtk_model = complete(mtk_model)
 
-function generate_f_h(model, inputs, outputs)
-    @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs; outputs=outputs, split=false)
+function get_control_function(model, inputs; filename="control_function.bin")
+    if isfile(filename)
+        println("deserializing control function")
+        return deserialize(filename)
+    else
+        println("generating control function: sit back, relax and enjoy...")
+        @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs; split=false)
+        println("serializing control function")
+        @time serialize(filename, (f_ip, dvs, psym, io_sys))
+        return (f_ip, dvs, psym, io_sys)
+    end
+end
+
+function generate_f_h(inputs, outputs, f_ip, dvs, psym, io_sys)
     any(ModelingToolkit.is_alg_equation, equations(io_sys)) && error("Systems with algebraic equations are not supported")
-    h_ = ModelingToolkit.build_explicit_observed_function(io_sys, outputs; inputs = inputs)
+    @time h_ = ModelingToolkit.build_explicit_observed_function(io_sys, outputs; inputs = inputs)
     nx = length(dvs)
     vx = string.(dvs)
     @show par = varmap_to_vars(defaults(io_sys), psym)
@@ -44,8 +58,9 @@ function generate_f_h(model, inputs, outputs)
 end
 
 inputs, outputs = [mtk_model.τ], [mtk_model.y]
+(f_ip, dvs, psym, mtk_model) = get_control_function(mtk_model, inputs; filename="mwe_control_function.bin")
 
-f!, h!, nx, vx = generate_f_h(mtk_model, inputs, outputs)
+f!, h!, nx, vx = generate_f_h(inputs, outputs, f_ip, dvs, psym, mtk_model)
 nu, ny, Ts = 1, 1, 0.1
 vu, vy = ["\$τ\$ (Nm)"], ["\$θ\$ (°)"]
 model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
@@ -60,7 +75,7 @@ display(plot(res, plotu=false))
 estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 
 mtk_model.K = defaults(mtk_model)[mtk_model.K] * 1.25
-f_plant, h_plant, _, _ = generate_f_h(mtk_model, inputs, outputs)
+f_plant, h_plant, _, _ = generate_f_h(inputs, outputs, f_ip, dvs, psym, mtk_model)
 plant = setname!(NonLinModel(f_plant, h_plant, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
 res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
 display(plot(res, plotu=false, plotxwithx̂=true))

@@ -19,11 +19,14 @@ function run_controller()
     kite.torque_control = true
     pos, vel = init_pos_vel(kite)
     kite_model, inputs = KiteModels.model!(kite, pos, vel)
-    outputs = [kite_model.pos[2, kite.num_A]]
+    outputs = []
 
-    println("running structural_simplify")
-    @time ModelingToolkit.structural_simplify(kite_model, (inputs, []); split=false)
-    println("running generate_control_function")
+    println("running full_equations in mpc")
+    @show length(equations(kite_model)) inputs split outputs
+    @time sys, _ = ModelingToolkit.structural_simplify(kite_model, (inputs, []); split=false, outputs=outputs)
+    @show ModelingToolkit.equations(sys)
+    @time ModelingToolkit.full_equations(sys)
+    println("running generate_control_function in mpc")
     @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(kite_model, inputs; outputs=outputs, split=false)
 
     # function generate_f_h(model, inputs, outputs)
