@@ -1,17 +1,25 @@
 module KitePredictiveControl
 
-using PrecompileTools: @setup_workload, @compile_workload 
-
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t
 using KiteModels
 using Plots
-
-# using JuliaSimCompiler
-# using Profile
+using Serialization
 
 export run_controller
+
+# function __init__()
+#     # 20 minutes
+#     @eval function Serialization.resolve_ref_immediately(s::Serialization.AbstractSerializer, x)
+#         s.table[s.counter] = x
+#         s.counter += 1
+#         nothing
+#     end
+# end
+
+include("mtk_interface.jl")
+
 
 function run_controller()
     set_data_path(joinpath(pwd(), "data"))
@@ -21,38 +29,21 @@ function run_controller()
     kite_model, inputs = KiteModels.model!(kite, pos, vel)
     outputs = []
 
-    println("running full_equations in mpc")
-    @show length(equations(kite_model)) inputs split outputs
-    @time sys, _ = ModelingToolkit.structural_simplify(kite_model, (inputs, []); split=false, outputs=outputs)
-    @show ModelingToolkit.equations(sys)
-    @time ModelingToolkit.full_equations(sys)
-    println("running generate_control_function in mpc")
-    @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(kite_model, inputs; outputs=outputs, split=false)
+    println("get_control_function") # started 8:42
+    @time (f_ip, dvs, psym, kite_model) = get_control_function(kite_model, inputs; filename="kite_control_function.bin")
 
-    # function generate_f_h(model, inputs, outputs)
-    #     println("generate_control_function")
-    #     @time (_, f_ip), dvs, psym, io_sys = ModelingToolkit.generate_control_function(model, inputs; outputs=outputs, split=false)
-    #     any(ModelingToolkit.is_alg_equation, equations(io_sys)) && error("Systems with algebraic equations are not supported")
-    #     @time h_ = ModelingToolkit.build_explicit_observed_function(io_sys, outputs; inputs = inputs)
-    #     nx = length(dvs)
-    #     vx = string.(dvs)
-    #     @show par = ModelingToolkit.varmap_to_vars(defaults(io_sys), psym)
-    #     function f!(dx, x, u, _)
-    #         f_ip(dx, x, u, par, 1)
-    #         nothing
-    #     end
-    #     function h!(y, x, _)
-    #         y .= h_(x, 1, par, 1)
-    #         nothing
-    #     end
-    #     return f!, h!, nx, vx
-    # end
+    
 
-    # f!, h!, nx, vx = generate_f_h(kite_model, inputs, outputs)
+    # println("generating f and h")
+    # @time f!, h!, nx, vx = generate_f_h(inputs, outputs, f_ip, dvs, psym, kite_model)
     # nu, ny, Ts = 1, 1, 0.1
     # vu, vy = ["\$τ\$ (Nm)"], ["\$θ\$ (°)"]
     # println("NonLinModel")
     # @time model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
+    # println("LinModel")
+    # @time linmodel = linearize(model)
+    # @time linmodel = linearize(model)
+    # @time linmodel = linearize(model)
 
     # u = [0.5]
     # N = 35
@@ -79,6 +70,7 @@ function run_controller()
 
     # res_yd = sim!(nmpc, N, [180.0], plant=plant, x_0=[π, 0], x̂_0=[π, 0, 0], y_step=[10])
     # display(plot(res_yd))
+    nothing
 end
 
 # @setup_workload begin
