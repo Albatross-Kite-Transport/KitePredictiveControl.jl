@@ -9,8 +9,8 @@ function pendulum(par, x, u)
 end
 # declared constants, to avoid type-instability in the f function, for speed:
 const par = (9.8, 0.4, 1.2, 0.3)
-f(x, u, _ ) = pendulum(par, x, u)
-h(x, _ )    = [180/π*x[1]]  # [°]
+f(x, u, _, _ ) = pendulum(par, x, u)
+h(x, _, _ )    = [180/π*x[1]]  # [°]
 nu, nx, ny, Ts = 1, 2, 1, 0.1
 vu, vx, vy = ["\$τ\$ (Nm)"], ["\$θ\$ (rad)", "\$ω\$ (rad/s)"], ["\$θ\$ (°)"]
 model = setname!(NonLinModel(f, h, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
@@ -25,7 +25,7 @@ plot(res, plotu=false)
 estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 
 const par_plant = (par[1], par[2], 1.25*par[3], par[4])
-f_plant(x, u, _ ) = pendulum(par_plant, x, u)
+f_plant(x, u, _, _ ) = pendulum(par_plant, x, u)
 plant = setname!(NonLinModel(f_plant, h, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
 @time res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
 plot(res, plotu=false, plotxwithx̂=true)
