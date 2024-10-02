@@ -37,34 +37,35 @@ f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, d
 Ts = 0.1
 model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
 
+println("sanity check")
 u = [0.5]
 N = 35
-res = sim!(model, N, u)
+@time res = sim!(model, N, u, x_0 = [0, 0])
 plot(res, plotu=false)
 
-α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
+# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
+# estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 
-defaults(io_sys)[mtk_model.K] = defaults(io_sys)[mtk_model.K] * 1.25
-f_plant!, _ = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
-plant = setname!(NonLinModel(f_plant!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
-res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
-plot(res, plotu=false, plotxwithx̂=true)
+# defaults(io_sys)[mtk_model.K] = defaults(io_sys)[mtk_model.K] * 1.25
+# f_plant!, _ = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
+# plant = setname!(NonLinModel(f_plant!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
+# res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
+# plot(res, plotu=false, plotxwithx̂=true)
 
 Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
-nmpc = NonLinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-umin, umax = [-1.5], [+1.5]
+nmpc = NonLinMPC(model; Hp, Hc, Mwt, Nwt, Cwt=Inf)
+umin, umax = [-0], [+0]
 nmpc = setconstraint!(nmpc; umin, umax)
 
-res_ry = sim!(nmpc, N, [180.0], plant=plant, x_0=[0, 0], x̂_0=[0, 0, 0])
+res_ry = sim!(nmpc, N, [180.0], plant=model, x_0=[0, 0], x̂_0=[0, 0, 0])
 display(plot(res_ry))
 
-x_0 = zeros(nx)
-x̂_0 = zeros(nx + ny)
-x_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
-x̂_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
-res_yd = sim!(nmpc, N, [180.0], plant=plant, x_0=x_0, x̂_0=x̂_0, y_step=[10])
-display(plot(res_yd))
+# x_0 = zeros(nx)
+# x̂_0 = zeros(nx + ny)
+# x_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
+# x̂_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
+# res_yd = sim!(nmpc, N, [180.0], plant=model, x_0=x_0, x̂_0=x̂_0, y_step=[10])
+# display(plot(res_yd))
 
 
 nothing

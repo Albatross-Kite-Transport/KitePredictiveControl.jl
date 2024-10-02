@@ -38,7 +38,7 @@ depower:
 kite:
     model: "data/kite.obj" # 3D model of the kite
     foil_file: "data/MH82.dat"  # filename for the foil shape
-    polar_file: "data/polars.csv"   # filename for the polars
+    polar_file: "data/polars.bin"   # filename for the polars
     physical_model: "KPS4_3L" # name of the kite model to use (KPS3 or KPS4)
     version: 2             # version of the model to use
     mass:  0.9             # kite mass [kg]
@@ -64,7 +64,7 @@ kps4_3l:
     tip_length: 0.62
     min_steering_line_distance: 1.0
     width:         4.1     # width of the kite                          [m]
-    aero_surfaces: 2      # number of aerodynamic surfaces in 3 line model
+    aero_surfaces: 5      # number of aerodynamic surfaces in 3 line model
     flap_height: 0.044     # height at the start of the flap of a normalized kite segment
 
 kcu:
@@ -84,7 +84,7 @@ bridle:
     rel_damping: 6.0          # relative damping of the kite spring (relative to main tether)
 
 tether:
-    d_tether:  2           # tether diameter                 [mm]
+    d_tether:  1           # tether diameter                 [mm]
     cd_tether: 0.958       # drag coefficient of the tether
     damping: 473.0         # unit damping coefficient        [Ns]
     c_spring: 614600.0     # unit spring constant coefficient [N]

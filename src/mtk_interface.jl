@@ -1,6 +1,5 @@
 
 function get_control_function(model, inputs)
-    println("generating control function")
     f_ip, dvs, psym, io_sys = ModelingToolkit.generate_control_function(IRSystem(model), inputs)
     # any(ModelingToolkit.is_alg_equation, equations(io_sys)) && error("Systems with algebraic equations are not supported")
     return (f_ip, dvs, psym, io_sys)
@@ -16,11 +15,19 @@ function generate_f_h(sys, inputs, outputs, f_ip, dvs, psym)
     vx = string.(dvs)
     par = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[2]
     function f!(dx, x, u, _, _)
-        f_ip(dx, x, u, par, 1)
+        if isa(u, Vector) && u[1] != 0.0
+            @show u
+        end
+        try
+            f_ip(dx, x, u, par, 0.0)
+        catch e
+            # @show dx x u
+            # rethrow(e)
+        end
         nothing
     end
     function h!(y, x, _, _)
-        y .= h_(x, fill(nothing, length(inputs)), par, 1)
+        h_(y, x, fill(nothing, length(inputs)), par, nothing)
         nothing
     end
     return f!, (h!, nu, ny, nx, vu, vy, vx)

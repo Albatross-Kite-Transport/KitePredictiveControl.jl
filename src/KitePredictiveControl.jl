@@ -7,71 +7,50 @@ using KiteModels
 using Plots
 using Serialization
 using JuliaSimCompiler
+using OrdinaryDiffEq
 
 # export run_controller
 
 include("mtk_interface.jl")
 
-if !@isdefined f_ip
-    set_data_path(joinpath(pwd(), "data"))
-    kite::KPS4_3L = KPS4_3L(KCU(se("system_3l.yaml")))
-    kite.torque_control = true
-    pos, vel = init_pos_vel(kite)
-    kite_model, inputs = KiteModels.model!(kite, pos, vel)
-    outputs = [kite_model.pos[2, end]]
+set_data_path(joinpath(pwd(), "data"))
+if ! @isdefined kite; kite::KPS4_3L = KPS4_3L(KCU(se("system_3l.yaml"))); end
+kite.torque_control = true
+KiteModels.init_sim!(kite; prn=true)
 
-    println("get_control_function")
-    @time (f_ip, dvs, psym, io_sys) = get_control_function(kite_model, inputs; filename="kite_control_function.bin")
-end
+kite_model, inputs = model!(kite, kite.pos, kite.vel)
+kite_model = complete(kite_model)
+outputs = [kite_model.pos[i, kite.num_A] for i in 1:3]
+wanted_outputs = [kite.pos[kite.num_A][i] for i in 1:3]
+@show wanted_outputs
 
-println("generating f and h")
-@time f!, h!, nx, vx, nu, vu, ny, vy = generate_f_h(inputs, outputs, f_ip, dvs, psym, kite_model)
-println("NonLinModel")
+(f_ip, dvs, psym, io_sys) = get_control_function(kite_model, inputs)
+f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
 Ts = 0.1
-@time model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
-# println("LinModel")
-# @time linmodel = linearize(model)
-# @time linmodel = linearize(model)
-# @time linmodel = linearize(model)
+model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=5000)); u=vu, x=vx, y=vy)
 
-u = [0.5, 0.5, 0.5]
-N = 35
-model.xop .= defaults(dvs)
-@show model.xop
-# @time res = sim!(model, N, u; )
-# display(plot(res, plotu=false))
+println("sanity check")
+u = [0.0, 0.0, 0.0]
+N = 10
+x_0 = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[1]
+@time res = sim!(model, N, u; x_0 = x_0)
+display(plot(res, plotu=false))
 
-# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-# estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
+println("mpc")
+max = 10
+Hp, Hc, Mwt, Nwt = 10, 2, [0.5], [2.5]
+nmpc = NonLinMPC(model; Hp, Hc, Cwt=Inf)
+umin, umax = fill(-max, 3), fill(max, 3)
+nmpc = setconstraint!(nmpc; umin=umin, umax=umax)
 
-# # kite_model.K = defaults(kite_model)[kite_model.K] * 1.25
-# f_plant, h_plant, _, _ = generate_f_h(kite_model, inputs, outputs)
-# plant = setname!(NonLinModel(f_plant, h_plant, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
-# println("sim")
-# @time res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
-# display(plot(res, plotu=false, plotxwithx̂=true))
+x̂_0 = zeros(length(x_0) + length(wanted_outputs))
+f!(x̂_0, x_0, zeros(3), nothing, nothing)
+res_ry = sim!(nmpc, 20, wanted_outputs, x_0 = x_0, x̂_0 = x̂_0)
+display(plot(res_ry))
 
-# Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
-# nmpc = NonLinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-# umin, umax = [-1.5], [+1.5]
-# nmpc = setconstraint!(nmpc; umin, umax)
 
-# res_ry = sim!(nmpc, N, [180.0], plant=plant, x_0=[0, 0], x̂_0=[0, 0, 0])
-# display(plot(res_ry))
-
-# res_yd = sim!(nmpc, N, [180.0], plant=plant, x_0=[π, 0], x̂_0=[π, 0, 0], y_step=[10])
-# display(plot(res_yd))
+# println("linearize")
+# @time ModelPredictiveControl.linearize(model; x=x_0, u=[0,0,0])
 nothing
-
-
-
-# end
-
-# @setup_workload begin
-#     @compile_workload begin
-#         run_controller()
-#         nothing
-#     end
-# end
 
 # end
