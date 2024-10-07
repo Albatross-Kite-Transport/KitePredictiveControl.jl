@@ -14,20 +14,21 @@ function generate_f_h(sys, inputs, outputs, f_ip, dvs, psym)
     vy = string.(outputs)
     vx = string.(dvs)
     par = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[2]
+    # include("../f.jl")
     function f!(dx, x, u, _, _)
-        if isa(u, Vector) && u[1] != 0.0
-            @show u
-        end
-        try
-            f_ip(dx, x, u, par, 0.0)
-        catch e
-            # @show dx x u
-            # rethrow(e)
+        # @assert length(dx) == length(x)
+        f_ip(dx, x, u, par, 1.0)
+        if !all(isfinite.(dx))
+            dx .= 0.0
+            # Core.println("x ", x)
+            # Core.println("dx ", dx)
+            # Core.println("u ", u)
+            # Core.println("par ", par)
         end
         nothing
     end
     function h!(y, x, _, _)
-        h_(y, x, fill(nothing, length(inputs)), par, nothing)
+        h_(y, x, fill(nothing, length(inputs)), par, 1.0)
         nothing
     end
     return f!, (h!, nu, ny, nx, vu, vy, vx)

@@ -3,7 +3,7 @@ using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t, varmap_to_vars
 using Serialization
 using JuliaSimCompiler
-using Plots
+using Plots, MadNLP
 
 const JSC = JuliaSimCompiler
 
@@ -35,13 +35,13 @@ inputs, outputs = [mtk_model.τ], [mtk_model.y]
 (f_ip, dvs, psym, io_sys) = get_control_function(mtk_model, inputs)
 f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
 Ts = 0.1
-model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
+model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=1)); u=vu, x=vx, y=vy)
 
 println("sanity check")
 u = [0.5]
 N = 35
 @time res = sim!(model, N, u, x_0 = [0, 0])
-plot(res, plotu=false)
+display(plot(res, plotu=false))
 
 # α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
@@ -52,10 +52,12 @@ plot(res, plotu=false)
 # res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
 # plot(res, plotu=false, plotxwithx̂=true)
 
-Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
-nmpc = NonLinMPC(model; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-umin, umax = [-0], [+0]
+Hp, Hc, Mwt, Nwt = 2, 1, [0.5], [2.5]
+nmpc = NonLinMPC(model; Hp, Hc, Cwt=Inf, optim=JuMP.Model(()->MadNLP.Optimizer(print_level=MadNLP.DEBUG, max_iter=100)))
+umin, umax = [-1.5], [1.5]
 nmpc = setconstraint!(nmpc; umin, umax)
+using JuMP; unset_time_limit_sec(nmpc.optim)
+unset_silent(nmpc.optim)
 
 res_ry = sim!(nmpc, N, [180.0], plant=model, x_0=[0, 0], x̂_0=[0, 0, 0])
 display(plot(res_ry))
