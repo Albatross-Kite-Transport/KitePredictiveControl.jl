@@ -43,42 +43,36 @@ f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, d
 
 x_0 = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[1]
 
-Ts = 1e-2
-N = 300
+Ts = 0.1
+N = 600
 model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=Int(1e5*Ts))); u=vu, x=vx, y=vy)
 setstate!(model, x_0)
 
-# println("sanity check")
-# u = [100, 100, -100]
-# @time res = sim!(model, N, u; x_0 = x_0)
-# display(plot(res, plotu=false))
-
-println("mpc")
-max = 100.0
-gain = 5e3
-Hp, Hc = 100, 2
+println("linear mpc")
+max = 200.0
+gain = 10e3
+Hp, Hc = 40, 1
 umin, umax = fill(-max, nu), fill(max, nu)
 Mwt = fill(0.0, ny)
-control_idxs = [findfirst(x -> x == string(kite_model.tether_length[i]), model.yname) for i in 1:3]
-Mwt[control_idxs] .= gain
-Nwt = fill(1/gain, nu)
+output_idxs = [findfirst(x -> x == string(kite_model.tether_length[i]), model.yname) for i in 1:3]
+Mwt[output_idxs] .= 1.0
+Nwt = fill(0.1, nu)
 
-println("linearize")
-# if !@isdefined linmodel
+if !@isdefined linmodel
+    println("linearize")
     @time linmodel = ModelPredictiveControl.linearize(model)
     println("sanity check")
     u = [100, 100, -100]
-    @time res = sim!(linmodel, N, u; x_0 = x_0)
+    res = sim!(linmodel, N, u; x_0 = x_0)
     display(plot(res; plotx=1:3, ploty=false, plotu=false))
-# end
+end
 
-# skf = SteadyKalmanFilter(linmodel; i_ym=1:ny, σQ=fill(1e-3/nx,nx), σR=fill(1e-3,ny), nint_u=0, nint_ym=0)
-# skf = SteadyKalmanFilter(linmodel; nint_ym=0, nint_u=0)
-estim = KalmanFilter(linmodel)
+α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
+estim = KalmanFilter(linmodel; nint_u = fill(1, nu), σQint_u=fill(0.1, nu), σQ = fill(0.1, nx), σR = fill(5.0, ny))
 mpc = LinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin=umin, umax=umax)
 @time res = sim!(mpc, N, initial_outputs, x_0 = x_0, lastu = [0, 0, -100.0])
-display(plot(res; plotx=1:3, ploty=false, plotu=true))
+display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=1:3))
 
 # xhat should be 86
 
