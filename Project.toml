@@ -5,6 +5,7 @@ version = "0.0.0"
 
 [deps]
 ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
+DAQP = "c47d62df-3981-49c8-9651-128b1cd08617"
 DynamicQuantities = "06fc5a27-2a28-4c7c-a15d-362465fb6821"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
