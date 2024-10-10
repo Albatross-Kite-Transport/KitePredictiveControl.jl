@@ -3,8 +3,8 @@
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t
-using KiteModels, Plots, Serialization, JuliaSimCompiler, OrdinaryDiffEq, ForwardDiff, RuntimeGeneratedFunctions, LinearAlgebra
-using JuMP, DAQP, MadNLP
+using KiteModels, Plots, Serialization, JuliaSimCompiler, OrdinaryDiffEq, RuntimeGeneratedFunctions, LinearAlgebra
+using JuMP, DAQP, MadNLP, SeeToDee, NonlinearSolve, ForwardDiff # solvers
 daqp = Model(DAQP.Optimizer, add_bridges=false)
 
 # export run_controller
@@ -23,18 +23,20 @@ kite_model = complete(kite_model)
 outputs = vcat(
     vcat(kite_model.flap_angle), 
     reduce(vcat, collect(kite_model.pos[:, 1:kite.num_flap_C])), 
-    reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
+    reduce(vcat, collect(kite_model.pos[:, kite.num_A])),
     vcat(kite_model.tether_length)
 )
 initial_outputs = vcat(
     vcat(kite.flap_angle), 
     reduce(vcat, kite.pos[1:kite.num_flap_C]), 
-    reduce(vcat, kite.pos[kite.num_flap_D+1:kite.num_A]),
+    vcat(kite.pos[kite.num_A]),
     vcat(kite.tether_lengths)
 )
 
+Ts = 0.1
+N = 100
 (f_ip, dvs, psym, io_sys) = get_control_function(kite_model, inputs)
-f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
+f, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(kite, io_sys, inputs, outputs, f_ip, dvs, psym, Ts)
 
 [defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
 [defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
@@ -43,36 +45,40 @@ f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, d
 
 x_0 = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[1]
 
-Ts = 0.1
-N = 600
-model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=Int(1e5*Ts))); u=vu, x=vx, y=vy)
+model = setname!(NonLinModel(f, h!, Ts, nu, nx, ny, solver=nothing); u=vu, x=vx, y=vy)
 setstate!(model, x_0)
 
-println("linear mpc")
-max = 200.0
-gain = 10e3
-Hp, Hc = 40, 1
-umin, umax = fill(-max, nu), fill(max, nu)
-Mwt = fill(0.0, ny)
-output_idxs = [findfirst(x -> x == string(kite_model.tether_length[i]), model.yname) for i in 1:3]
-Mwt[output_idxs] .= 1.0
-Nwt = fill(0.1, nu)
+# println("nonlinear sanity check")
+# @time res = sim!(model, 3, zeros(3); x_0 = x_0)
+# display(plot(res; plotx=1:3, ploty=false, plotu=false))
 
-if !@isdefined linmodel
+
+# @assert false
+
+println("linear mpc")
+Hp, Hc = 40, 10
+umin, umax = [-50, -50, -200], [0, 0, 0]
+Mwt = fill(0, ny)
+output_idxs = [findfirst(x -> x == string(kite_model.tether_length[i]), model.yname) for i in 1:3]
+ratio = norm.(kite.winch_forces)[3] / norm.(kite.winch_forces)[1]
+Mwt[output_idxs] .= [1, 1, round(ratio)]
+Nwt = fill(0.001, nu)
+
+# if !@isdefined linmodel
     println("linearize")
-    @time linmodel = ModelPredictiveControl.linearize(model)
+    @time linmodel = ModelPredictiveControl.linearize(model; x = x_0)
     println("sanity check")
     u = [100, 100, -100]
     res = sim!(linmodel, N, u; x_0 = x_0)
     display(plot(res; plotx=1:3, ploty=false, plotu=false))
-end
+# end
 
-α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-estim = KalmanFilter(linmodel; nint_u = fill(1, nu), σQint_u=fill(0.1, nu), σQ = fill(0.1, nx), σR = fill(5.0, ny))
+estim = KalmanFilter(linmodel; nint_u=fill(1, nu), σQint_u=fill(0.1, nu), σQ = fill(0.001, nx), σR = fill(0.1, ny)) # sigma q important!
 mpc = LinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin=umin, umax=umax)
-@time res = sim!(mpc, N, initial_outputs, x_0 = x_0, lastu = [0, 0, -100.0])
-display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=1:3))
+@time res = sim!(mpc, N, initial_outputs.-1.0, plant=model, x_0 = x_0, lastu = [0, 0, 0]) # plant=model
+display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=[2, 3, 1]))
+# display(plot(res; plotx=false, ploty=[output_idxs[3]], plotu=[3], plotxwithx̂=[3]))
 
 # xhat should be 86
 
