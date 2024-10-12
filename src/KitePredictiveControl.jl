@@ -36,7 +36,7 @@ initial_outputs = vcat(
 Ts = 0.1
 N = 100
 (f_ip, dvs, psym, io_sys) = get_control_function(kite_model, inputs)
-f, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(kite, io_sys, inputs, outputs, f_ip, dvs, psym, Ts)
+f, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym, Ts)
 
 [defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
 [defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
@@ -48,9 +48,9 @@ x_0 = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[1]
 model = setname!(NonLinModel(f, h!, Ts, nu, nx, ny, solver=nothing); u=vu, x=vx, y=vy)
 setstate!(model, x_0)
 
-# println("nonlinear sanity check")
-# @time res = sim!(model, 3, zeros(3); x_0 = x_0)
-# display(plot(res; plotx=1:3, ploty=false, plotu=false))
+println("nonlinear sanity check")
+@time res = sim!(model, 3, zeros(3); x_0 = x_0)
+display(plot(res; plotx=1:3, ploty=false, plotu=false))
 
 
 # @assert false
