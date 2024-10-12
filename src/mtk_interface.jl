@@ -18,12 +18,19 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
 
     get_out = getu(kite.integrator.sol, outputs)
     
+
+    # function loss(p)
+    #     _prob = remake(prob, u0 = eltype(p).(prob.u0), p = MyStruct(p))
+    #     sol = solve(_prob, ...)
+    #     # do stuff on sol
+    # end
+    solver = QNDF()
     function f(state, input, _, _)
         # OrdinaryDiffEq.reinit!(kite.integrator, state)
-        kite.integrator.u .= state
-        kite.set_set_values(kite.integrator, input)
-        OrdinaryDiffEq.step!(kite.integrator, Ts, true)
-        return kite.integrator.u
+        # kite.set_set_values(kite.prob, input)
+        prob = remake(kite.prob; u0 = state, p = [kite.simple_sys.set_values => input])
+        sol = OrdinaryDiffEq.solve(prob, solver; saveat=0.1, abstol=1e-2, reltol=1e-2);
+        return @views sol.u[end]
     end
     function h(y, x, _, _)
         return get_out(kite.integrator)

@@ -4,6 +4,7 @@ authors = ["Bart van de Lint <bart@vandelint.net>"]
 version = "0.0.0"
 
 [deps]
+ControlSystems = "a6e380b2-a6ca-5380-bf3e-84a91bcd477e"
 ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
 DAQP = "c47d62df-3981-49c8-9651-128b1cd08617"
 DynamicQuantities = "06fc5a27-2a28-4c7c-a15d-362465fb6821"
