@@ -4,7 +4,7 @@ using ModelPredictiveControl
 using ModelingToolkit
 using KiteModels, ControlSystems, Plots, Serialization, OrdinaryDiffEq, RuntimeGeneratedFunctions, LinearAlgebra, SymbolicIndexingInterface
 using JuMP, DAQP, MadNLP, SeeToDee, NonlinearSolve, ForwardDiff # solvers
-daqp = Model(DAQP.Optimizer, add_bridges=false)
+using ControlSystemIdentification, ControlSystemsBase
 
 # export run_controller
 
@@ -37,15 +37,22 @@ initial_outputs = vcat(
 [defaults(kite_model)[kite_model.flap_angle[i]] = kite.flap_angle[i] for i in 1:2]
 [defaults(kite_model)[kite_model.tether_length[i]] = kite.tether_lengths[i] for i in 1:3]
 
-Ts = 0.1
+Ts = 0.01
 N = 10
-@time (; A, B, C, D), simple_sys = ModelingToolkit.linearize(kite_model, inputs, outputs; t=1.0, op = defaults(kite_model));
+
+lin_fun, simple_sys = ModelingToolkit.linearization_function(kite_model, inputs, outputs)
+@time (; A, B, C, D) = ModelingToolkit.linearize(simple_sys, lin_fun; t=1.0, op = defaults(kite_model));
+@time (; A, B, C, D) = ModelingToolkit.linearize(simple_sys, lin_fun; t=1.0, op = defaults(kite_model));
+
+css = ss(A, B, C, D)
+@time dss = c2d(continuous_ss, Ts)
+
 x_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), unknowns(simple_sys))
 u_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), inputs)
 y_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), outputs)
-model = LinModel(A, B, C, B[:, end+1:end], D[:, end+1:end], Ts)
+model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
 setstate!(model, x_0)
-setop!(model, xop=x_0, yop=y_0, uop=u_0)
+# setop!(model, xop=x_0, yop=y_0, uop=u_0)
 model.uname .= string.(inputs)
 model.yname .= string.(outputs)
 model.xname .= string.(unknowns(kite.simple_sys))
@@ -62,16 +69,16 @@ Mwt[output_idxs] .= [1, 1, round(ratio)]
 Nwt = fill(0.001, model.nu)
 
 println("sanity check")
-u = zeros(3)
-res = sim!(model, N, [100, 100, 100]; x_0 = x_0)
+u = [-10, -10, -500]
+res = sim!(model, N, u; x_0 = x_0)
 display(plot(res; plotx=tether_idxs, ploty=false, plotu=false))
 
-# estim = SteadyKalmanFilter(model; nint_u=fill(1, model.nu), σQint_u=fill(0.1, model.nu), σQ = fill(0.1, model.nx), σR = fill(0.1, model.ny)) # sigma q important!
-# mpc = NonLinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=Inf)
-# mpc = setconstraint!(mpc; umin=umin, umax=umax)
-# @time res = sim!(mpc, N, initial_outputs.-1.0, x_0 = x_0, lastu = [0, 0, 0]) # plant=model
-# display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=[2, 3, 1]))
-# # display(plot(res; plotx=false, ploty=[output_idxs[3]], plotu=[3], plotxwithx̂=[3]))
+estim = SteadyKalmanFilter(model; nint_u=fill(1, model.nu), σQint_u=fill(0.1, model.nu), σQ = fill(0.1, model.nx), σR = fill(0.1, model.ny)) # sigma q important!
+mpc = NonLinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=Inf)
+mpc = setconstraint!(mpc; umin=umin, umax=umax)
+@time res = sim!(mpc, N, initial_outputs.-1.0, x_0 = x_0, lastu = [0, 0, 0]) # plant=model
+display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=[2, 3, 1]))
+# display(plot(res; plotx=false, ploty=[output_idxs[3]], plotu=[3], plotxwithx̂=[3]))
 
 
 # println("nonlinear stepping")

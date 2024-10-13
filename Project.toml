@@ -4,6 +4,7 @@ authors = ["Bart van de Lint <bart@vandelint.net>"]
 version = "0.0.0"
 
 [deps]
+ControlSystemIdentification = "3abffc1c-5106-53b7-b354-a47bfc086282"
 ControlSystems = "a6e380b2-a6ca-5380-bf3e-84a91bcd477e"
 ControlSystemsBase = "aaaaaaaa-a6ca-5380-bf3e-84a91bcd477e"
 DAQP = "c47d62df-3981-49c8-9651-128b1cd08617"
@@ -27,3 +28,4 @@ RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
 SeeToDee = "1c904df7-48cd-41e7-921b-d889ed9a470c"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
+TotalLeastSquares = "028f657a-7ace-5159-a694-8cfd97933b0c"
