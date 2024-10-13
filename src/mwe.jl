@@ -1,13 +1,44 @@
 using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t, varmap_to_vars
-using Serialization
 using JuliaSimCompiler
-using Plots, MadNLP
+using Plots
+using SeeToDee
 
 const JSC = JuliaSimCompiler
 
-include("mtk_interface.jl")
+function get_control_function(model, inputs)
+    f_ip, dvs, psym, io_sys = ModelingToolkit.generate_control_function(IRSystem(model), inputs)
+    return (f_ip, dvs, psym, io_sys)
+end
+
+function generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym, Ts)
+    h_ = JuliaSimCompiler.build_explicit_observed_function(io_sys, outputs; inputs = inputs, target = JuliaSimCompiler.JuliaTarget())
+    nu = length(inputs)
+    ny = length(outputs)
+    nx = length(dvs)
+    vu = string.(inputs)
+    vy = string.(outputs)
+    vx = string.(dvs)
+    par = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[2]
+    function f_oop(x, u, par, t)
+        dx = Vector{Any}(undef, nx)
+        f_ip(dx, x, u, par, t)
+        return dx
+    end
+    # fails when using SimpleColloc, but works when using Rk4
+    f_disc = SeeToDee.Rk4(f_oop, Ts; supersample = 1)
+    f_disc = SimpleColloc(f_oop, Ts, nx, 0, nu)
+    SeeToDee.linearize(f_disc, [0.0, 0.0], [0.0], par, 1)
+    function f(x, u, _, _)
+        return f_disc(x, u, par, 1.0)
+    end
+    function h!(y, x, _, _)
+        h_(y, x, fill(nothing, length(inputs)), par, 1.0)
+        nothing
+    end
+    return f, (h!, nu, ny, nx, vu, vy, vx) # TODO: check on mwe.jl
+end
 
 @mtkmodel Pendulum begin
     @parameters begin
@@ -32,42 +63,17 @@ end
 mtk_model = complete(mtk_model)
 inputs, outputs = [mtk_model.τ], [mtk_model.y]
 
-(f_ip, dvs, psym, io_sys) = get_control_function(mtk_model, inputs)
-f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
 Ts = 0.1
-model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=1)); u=vu, x=vx, y=vy)
+N = 35
+(f_ip, dvs, psym, io_sys) = get_control_function(mtk_model, inputs)
+f, (h, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym, Ts)
+model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing); u=vu, x=vx, y=vy)
 
 println("sanity check")
 u = [0.5]
-N = 35
 @time res = sim!(model, N, u, x_0 = [0, 0])
 display(plot(res, plotu=false))
 
-# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-# estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
-
-# defaults(io_sys)[mtk_model.K] = defaults(io_sys)[mtk_model.K] * 1.25
-# f_plant!, _ = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
-# plant = setname!(NonLinModel(f_plant!, h!, Ts, nu, nx, ny); u=vu, x=vx, y=vy)
-# res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
-# plot(res, plotu=false, plotxwithx̂=true)
-
-Hp, Hc, Mwt, Nwt = 2, 1, [0.5], [2.5]
-nmpc = NonLinMPC(model; Hp, Hc, Cwt=Inf, optim=JuMP.Model(()->MadNLP.Optimizer(print_level=MadNLP.DEBUG, max_iter=100)))
-umin, umax = [-1.5], [1.5]
-nmpc = setconstraint!(nmpc; umin, umax)
-using JuMP; unset_time_limit_sec(nmpc.optim)
-unset_silent(nmpc.optim)
-
-res_ry = sim!(nmpc, N, [180.0], plant=model, x_0=[0, 0], x̂_0=[0, 0, 0])
-display(plot(res_ry))
-
-# x_0 = zeros(nx)
-# x̂_0 = zeros(nx + ny)
-# x_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
-# x̂_0[ModelingToolkit.variable_index(io_sys, :θ)] = π
-# res_yd = sim!(nmpc, N, [180.0], plant=model, x_0=x_0, x̂_0=x̂_0, y_step=[10])
-# display(plot(res_yd))
-
+ModelPredictiveControl.linearize(model)
 
 nothing
