@@ -24,13 +24,13 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
     #     sol = solve(_prob, ...)
     #     # do stuff on sol
     # end
-    solver = QNDF()
     function f(state, input, _, _)
-        # OrdinaryDiffEq.reinit!(kite.integrator, state)
+        OrdinaryDiffEq.reinit!(kite.integrator, state)
         # kite.set_set_values(kite.prob, input)
-        prob = remake(kite.prob; u0 = state, p = [kite.simple_sys.set_values => input])
-        sol = OrdinaryDiffEq.solve(prob, solver; saveat=0.1, abstol=1e-2, reltol=1e-2);
-        return @views sol.u[end]
+        # prob = remake(kite.prob; u0 = state, p = [kite.simple_sys.set_values => input])
+        # sol = OrdinaryDiffEq.solve(prob, solver; saveat=0.1, abstol=kite.set.abstol, reltol=kite.set.reltol);
+        next_step!(kite; set_values=input, dt=Ts)
+        return kite.integrator.u
     end
     function h(y, x, _, _)
         return get_out(kite.integrator)
