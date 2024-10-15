@@ -3,7 +3,7 @@
 using ModelPredictiveControl
 using ModelingToolkit
 using KiteModels, ControlSystems, Plots, Serialization, OrdinaryDiffEq, RuntimeGeneratedFunctions, LinearAlgebra, SymbolicIndexingInterface
-using JuMP, DAQP, MadNLP, SeeToDee, NonlinearSolve, ForwardDiff # solvers
+using JuMP, DAQP, MadNLP, HiGHS, SeeToDee, NonlinearSolve, ForwardDiff # solvers
 using ControlSystemIdentification, ControlSystemsBase
 using ModelingToolkit: variable_index as idx
 # import RobustAndOptimalControl: named_ss
@@ -11,6 +11,8 @@ using ModelingToolkit: variable_index as idx
 # export run_controller
 
 include("mtk_interface.jl")
+
+optim = JuMP.Model(DAQP.Optimizer)
 
 set_data_path(joinpath(pwd(), "data"))
 if ! @isdefined kite
@@ -20,114 +22,131 @@ if ! @isdefined kite
 
     kite_model, inputs = model!(kite, kite.pos, kite.vel)
     kite_model = complete(kite_model)
+    outputs = vcat(
+        vcat(kite_model.flap_angle), 
+        reduce(vcat, collect(kite_model.pos[:, 1:kite.num_flap_C-1])), 
+        reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
+        vcat(kite_model.tether_length),
+        # kite_model.winch_force[3]
+    )
+    initial_outputs = vcat(
+        vcat(kite.flap_angle), 
+        reduce(vcat, kite.pos[1:kite.num_flap_C-1]), 
+        reduce(vcat, kite.pos[kite.num_flap_D+1:kite.num_A]),
+        vcat(kite.tether_lengths),
+        # norm.(kite.winch_forces)[3]
+    )
+    
+    lin_fun, sys = ModelingToolkit.linearization_function(kite_model, inputs, outputs)
+    [defaults(sys)[sys.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
+    [defaults(sys)[sys.vel[j, i]] = kite.vel[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
+    [defaults(sys)[sys.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
+    [defaults(sys)[sys.vel[j, i]] = kite.vel[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
+    [defaults(sys)[sys.flap_angle[i]] = kite.flap_angle[i] for i in 1:2]
+    [defaults(sys)[sys.flap_vel[i]] = kite.flap_angle[i] for i in 1:2]
+    [defaults(sys)[sys.tether_length[i]] = kite.tether_lengths[i] for i in 1:3]
+    [defaults(sys)[sys.tether_vel[i]] = kite.tether_lengths[i] for i in 1:3]
 end
-outputs = vcat(
-    vcat(kite_model.flap_angle), 
-    reduce(vcat, collect(kite_model.pos[:, 1:kite.num_flap_C-1])), 
-    reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
-    vcat(kite_model.tether_length),
-    kite_model.winch_force[3]
-)
-initial_outputs = vcat(
-    vcat(kite.flap_angle), 
-    reduce(vcat, kite.pos[1:kite.num_flap_C-1]), 
-    reduce(vcat, kite.pos[kite.num_flap_D+1:kite.num_A]),
-    vcat(kite.tether_lengths),
-    norm.(kite.winch_forces)[3]
-)
 
-[defaults(kite_model)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
-[defaults(kite_model)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
-[defaults(kite_model)[kite_model.flap_angle[i]] = kite.flap_angle[i] for i in 1:2]
-[defaults(kite_model)[kite_model.tether_length[i]] = kite.tether_lengths[i] for i in 1:3]
+Ts = 0.01
+N = 1000
+solver = QNDF(autodiff=false)
+kite.integrator = OrdinaryDiffEq.init(kite.prob, solver; dt=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol, save_on=false)
 
-lin_fun, sys = ModelingToolkit.linearization_function(kite_model, inputs, outputs)
-Ts = 0.1
-N = 400
-
-(; A, B, C, D) = ModelingToolkit.linearize(sys, lin_fun; t=1.0, op = defaults(sys));
+x_0 = copy(kite.integrator.u)
+p_0 = copy(kite.integrator.p)
+(; A, B, C, D) = linearize(sys, lin_fun, x_0, p_0; t=1.0);
 css = ss(A, B, C, D)
 dss = c2d(css, Ts)
 model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-x_0 = ModelingToolkit.varmap_to_vars(defaults(sys), unknowns(sys))
 setstate!(model, x_0)
+setname!(model; u=string.(inputs), y=string.(outputs), x=string.(unknowns(sys)))
 
-model.uname .= string.(inputs)
-model.yname .= string.(outputs)
-model.xname .= string.(unknowns(sys))
+f!, h! = generate_f_h(kite, inputs, outputs, Ts)
+plant = NonLinModel(f!, h!, Ts, model.nu, model.nx, model.ny, solver=nothing)
+setstate!(plant, x_0)
+
+# println("linear sanity check")
+# u = [-10, -0, -100]
+# res = sim!(model, 10, u; x_0 = x_0)
+# p1 = plot(res; plotx=vcat(idx(sys, sys.tether_length), idx(sys, sys.pos[2, kite.num_A])), ploty=false, plotu=false)
+
+# println("nonlinear sanity check")
+# res = sim!(plant, 10, u; x_0 = x_0)
+# p2 = plot(res; plotx=vcat(idx(sys, sys.tether_length), idx(sys, sys.pos[2, kite.num_A])), ploty=false, plotu=false)
+# savefig(plot(p1, p2, layout=(1, 2)), "zeros.png")
  
+# @assert false
+
 println("linear mpc")
-Hp, Hc = 100, 20
-umin, umax = [-40, -40, -200], [0, 0, 0]
 output_idxs = vcat(
-    idx(sys, sys.pos[2, kite.num_A]),
-    model.ny,
+    idx(model.yname, sys.pos[2, kite.num_A]),
+    # idx(model.yname, sys.winch_force[3]),
+    idx(model.yname, sys.tether_length[3])
 )
 observed_idxs = vcat(
-    idx(sys, sys.pos[2, kite.num_A]),
+    # idx(sys, sys.pos[2, kite.num_A]),
     idx(sys, sys.tether_length[3]),
-    model.nx + model.ny
+    idx(sys, sys.tether_length[2]),
+    idx(sys, sys.tether_length[1]),
+    # model.nx + model.ny
 )
 
 Mwt = fill(0.0, model.ny)
-Mwt[output_idxs] .= 1.0
+Mwt[idx(model.yname, sys.pos[2, kite.num_A])] = 10.0
+# Mwt[idx(model.yname, sys.tether_length[3])] = 0.1
 Nwt = fill(10, model.nu)
 
-# println("sanity check")
-# u = [-10, -10, -500]
-# res = sim!(model, N, u; x_0 = x_0)
-# display(plot(res; plotx=tether_idxs, ploty=false, plotu=false))
-
 σR = fill(0.01, model.ny)
-σR[model.ny] = 1.0
-estim = SteadyKalmanFilter(model; nint_u=fill(1, model.nu), σQint_u=fill(0.1, model.nu), σQ = fill(0.3, model.nx), σR = σR) # sigma q important!
-mpc = LinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=1e5)
+σQ = fill(1000/model.nx, model.nx)
+σQint_u=fill(1, model.nu)
+nint_u=fill(1, model.nu)
+estim = ModelPredictiveControl.KalmanFilter(model; nint_u, σQint_u, σQ, σR)
 
-x̂max = fill(Inf, model.nx+model.ny)
-x̂min = fill(-Inf, model.nx+model.ny)
-x̂max[tether_idx] = x_0[tether_idx] + 10.0
-x̂min[tether_idx] = x_0[tether_idx] - 10.0
-x̂min[end] = -500.0
-x̂max[end] = 500
+Hp, Hc = 40, 10
+mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=1e9, optim)
 
-mpc = setconstraint!(mpc; umin=umin, umax=umax, x̂max = x̂max, x̂min = x̂min)
-@time res = sim!(mpc, N, initial_outputs .+ 0.1, x_0 = x_0, lastu = [0, 0, 0]) # plant=model
-display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=observed_idxs))
-# println("maximum force: ", maximum([force(res.X_data[:, i], fill(0, length(inputs)), par, 1.0) for i in 1:N]))
+umin, umax = [-10, -10, -100], [0, 0, 0]
+ymin = fill(-Inf, model.ny)
+ymax = fill(Inf, model.ny)
+ymin[idx(model.yname, sys.tether_length[3])] = 0.0
+ymax[idx(model.yname, sys.tether_length[3])] = 51.0
+# ymin[end] = -1000
+# ymax[end] = 1000
+setconstraint!(mpc; umin, umax, ymin, ymax)
 
+println("stepping linear mpc with nonlinear plant")
 
-
-
-# println("stepping linear mpc with nonlinear plant")
-
-# estim = KalmanFilter(model; σQ, σR, nint_u, σQint_u)
-# mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf, optim=daqp)
+# estim = ModelPredictiveControl.KalmanFilter(model; σQ, σR, nint_u, σQint_u)
+# mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=1e5)
 # mpc = setconstraint!(mpc; umin, umax)
-# function sim_adapt!(mpc, kite_model, N, ry, plant, x_0, x̂_0, y_step=[0])
-#     U_data, Y_data, Ry_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N)
-#     setstate!(plant, x_0)
-#     initstate!(mpc, [0], plant())
-#     setstate!(mpc, x̂_0)
-#     for i = 1:N
-#         y = plant() + y_step
-#         x̂ = preparestate!(mpc, y)
-#         u = moveinput!(mpc, ry)
-#         model = linearize(kite_model; u, x=x̂[1:2])
-#         (; A, B, C, D) = ModelingToolkit.linearize(sys, lin_fun; t=1.0, op = );
-#         css = ss(A, B, C, D)
-#         dss = c2d(css, Ts)
-#         model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-#         setmodel!(mpc, model)
-#         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
-#         updatestate!(mpc, u, y) # update mpc state estimate
-#         updatestate!(plant, u)  # update plant simulator
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data)
-#     return res
-# end
-# x_0 = [0, 0]; x̂_0 = [0, 0, 0]; ry = [180]
-# res_slin = sim_adapt!(mpc, kite_model, N, ry, plant, x_0, x̂_0)
-# plot(res_slin)
+function sim_adapt!(mpc, sys, model, N, ry, plant, x_0, y_step=zeros(plant.ny))
+    U_data, Y_data, Ry_data, X̂_data, X_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx+plant.ny, N), zeros(plant.nx, N)
+    setstate!(plant, x_0)
+    initstate!(mpc, zeros(3), plant())
+    # setstate!(mpc, x_0)
+    for i = 1:N
+        @show i
+        y = plant() + y_step
+        x̂ = preparestate!(mpc, y)
+        u = moveinput!(mpc, ry)
+        (; A, B, C, D) = linearize(sys, lin_fun, plant.x0, p_0; t=1.0);
+        css = ss(A, B, C, D)
+        dss = c2d(css, Ts)
+        model.A .= dss.A
+        model.Bu .= dss.B
+        model.C .= dss.C
+        # setmodel!(mpc, model)
+        U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:, i], X_data[:, i] = u, y, ry, x̂, plant.x0
+        updatestate!(mpc, u, y) # update mpc state estimate
+        updatestate!(plant, u)  # update plant simulator
+    end
+    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
+    return res
+end
+ry = initial_outputs .+ 0.02
+res = sim_adapt!(mpc, sys, model, N, ry, plant, x_0)
+display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=observed_idxs))
 
 nothing
 
