@@ -13,15 +13,15 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
         # @show kite.prob.u0
         # prob = remake(kite.prob; u0 = state, p = [kite.simple_sys.set_values => input], tspan=(0.0, Ts))
         # @show prob.u0
-        # sol = OrdinaryDiffEq.solve(prob, solver; saveat=0.1, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol);
-        OrdinaryDiffEq.reinit!(kite.integrator, state)
+        # sol = OrdinaryDiffEqCore.solve(prob, solver; saveat=0.1, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol);
+        OrdinaryDiffEqCore.reinit!(kite.integrator, state)
         kite.set_set_values(kite.integrator, input)
-        OrdinaryDiffEq.step!(kite.integrator, Ts, true)
+        OrdinaryDiffEqCore.step!(kite.integrator, Ts, true)
         next_state .= kite.integrator.u
         nothing
     end
     function h!(outputs, state, _, _)
-        OrdinaryDiffEq.reinit!(kite.integrator, state)
+        OrdinaryDiffEqCore.reinit!(kite.integrator, state)
         outputs .= get_out(kite.integrator)
         nothing
     end
