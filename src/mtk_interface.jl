@@ -7,7 +7,6 @@ MTK = ModelingToolkit
 
 function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
     get_out = getu(kite.integrator.sol, outputs)
-    solver = QNDF(autodiff=false)
 
     function f!(next_state, state, input, _, _)
         # @show kite.prob.u0
@@ -28,16 +27,22 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
     return f!, h!
 end
 
-function linearize(sys, lin_fun, u0::Vector{Float64}, p::MTKParameters; t = 1.0, allow_input_derivatives = false)
-    linres = lin_fun(u0, p, t)
+function get_next_state(kite::KPS4_3L, x, u, Ts)
+    OrdinaryDiffEqCore.reinit!(kite.integrator, x)
+    next_step!(kite; set_values = u, dt = Ts)
+    return kite.integrator.u
+end
+
+function linearize!(ci::ControlInterface, linmodel, x, u, p)
+    return linearize(ci.kite, ci.sys, ci.lin_fun, ci.get_y, x, u, p, ci.Ts; linmodel)
+end
+function linearize(kite::KPS4_3L, sys, lin_fun, get_y, x::Vector{Float64}, 
+            u::Vector{Float64}, p::MTKParameters, Ts; linmodel = nothing, t = 1.0, allow_input_derivatives = false)
+    linres = lin_fun(x, p, t) # TODO: u0 is not the same as x0??
     f_x, f_z, g_x, g_z, f_u, g_u, h_x, h_z, h_u = linres
-
     nx, nu = size(f_u)
-    nz = size(f_z, 2)
     ny = size(h_x, 1)
-
     D = h_u
-
     if isempty(g_z)
         A = f_x
         B = f_u
@@ -54,7 +59,6 @@ function linearize(sys, lin_fun, u0::Vector{Float64}, p::MTKParameters; t = 1.0,
             gzgx*f_x gzgx*f_z]
         B = [f_u
             gzgx * f_u] # The cited paper has zeros in the bottom block, see derivation in https://github.com/SciML/ModelingToolkit.jl/pull/1691 for the correct formula
-
         C = [h_x h_z]
         Bs = -(gz \ g_u) # This equation differ from the cited paper, the paper is likely wrong since their equaiton leads to a dimension mismatch.
         if !iszero(Bs)
@@ -66,10 +70,28 @@ function linearize(sys, lin_fun, u0::Vector{Float64}, p::MTKParameters; t = 1.0,
             D = [D zeros(ny, nu)]
         end
     end
-
-    (; A, B, C, D)
+    # --- discretize and generate model ---
+    css = ss(A, B, C, D)
+    dss = c2d(css, Ts, :zoh)
+    if isnothing(linmodel)
+        linmodel = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
+    else
+        linmodel.A  .= dss.A
+        linmodel.Bu .= dss.B
+        linmodel.C  .= dss.C
+    end
+    # --- modify the linear model operating points ---
+    linmodel.uop .= u
+    linmodel.yop .= get_y(kite.integrator)
+    linmodel.xop .= x
+    linmodel.fop .= get_next_state(kite, x, u, Ts)
+    # --- reset the state of the linear model ---
+    linmodel.x0 .= 0 # state deviation vector is always x0=0 after a linearization
+    return linmodel
 end
 
 function ModelingToolkit.variable_index(name::Vector{String}, var)
     return findfirst(x -> x == string(var), name)
 end
+
+# 532219

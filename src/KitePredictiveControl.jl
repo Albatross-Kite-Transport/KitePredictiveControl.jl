@@ -12,19 +12,28 @@ using ModelingToolkit: variable_index as idx
 export step!, controlplot, live_plot, stop_plot
 export ControlInterface
 
-include("mtk_interface.jl")
-
 set_data_path(joinpath(@__DIR__, "..", "data"))
 @with_kw mutable struct ControlInterface
+    "fast linearization function"
     lin_fun::Function
+    "simplified system of the kite model"
     sys::ODESystem
+    "symbolic inputs"
     inputs::Vector{Symbolics.Num}
+    "symbolic outputs"
     outputs::Vector{Symbolics.Num}
-    initial_outputs::Vector{Float64}
+    "initial outputs"
+    y_0::Vector{Float64}
+    "initial state"
     x_0::Vector{Float64}
+    "parameters of the kite system"
     p_0::ModelingToolkit.MTKParameters
+    "sampling time"
     Ts::Float64
-    model::ModelPredictiveControl.LinModel
+    "realistic nonlinear model of the kite"
+    kite::KPS4_3L
+    "linearized model of the kite"
+    linmodel::ModelPredictiveControl.LinModel
     mpc::ModelPredictiveControl.LinMPC
     optim::JuMP.Model
     U_data::Matrix{Float64}
@@ -40,21 +49,23 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     plotting::Bool = true
 end
 
+include("mtk_interface.jl")
+
 function ControlInterface(kite; Ts = 0.05)
-    KiteModels.init_sim!(kite; prn=true, torque_control=kite.torque_control)
-    kite_model, inputs = model!(kite, kite.pos, kite.vel)
-    kite_model = complete(kite_model)
+    # --- get symbolic model ---
+    sym_model, inputs = model!(kite, kite.pos, kite.vel)
+    sym_model = complete(sym_model)
     outputs = vcat(
-        vcat(kite_model.flap_angle), 
-        reduce(vcat, collect(kite_model.pos[:, 4:kite.num_flap_C-1])), 
-        reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
-        vcat(kite_model.tether_length),
-        kite_model.heading
-        # kite_model.winch_force[3]
+        vcat(sym_model.flap_angle), 
+        reduce(vcat, collect(sym_model.pos[:, 4:kite.num_flap_C-1])), 
+        reduce(vcat, collect(sym_model.pos[:, kite.num_flap_D+1:kite.num_A])),
+        vcat(sym_model.tether_length),
+        sym_model.heading_y
+        # sym_model.winch_force[3]
     )
     get_y = getu(kite.integrator.sol, outputs)
-    initial_outputs = kite.integrator[outputs]
-    lin_fun, sys = ModelingToolkit.linearization_function(kite_model, inputs, outputs)
+    y_0 = kite.integrator[outputs]
+    lin_fun, sys = ModelingToolkit.linearization_function(sym_model, inputs, outputs)
 
     time = 5 # amount of time to be saved
     N = Int(round(time / Ts))
@@ -65,67 +76,70 @@ function ControlInterface(kite; Ts = 0.05)
     x_0 = deepcopy(kite.integrator.u)
     p_0 = deepcopy(kite.integrator.p)
 
-    model = create_lin_model(sys, lin_fun, Ts, inputs, outputs, x_0, p_0)
-    # f!, h! = generate_f_h(kite, inputs, outputs, Ts)
-    # plant = NonLinModel(f!, h!, Ts, model.nu, model.nx, model.ny, solver=nothing)
-    # setstate!(plant, x_0)
+    linmodel = linearize(kite, sys, lin_fun, get_y, x_0, zeros(3), p_0, Ts)
+    setname!(linmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
+
     output_idxs = vcat(
-        idx(model.yname, sys.heading),
-        # idx(model.yname, sys.winch_force[3]),
-        idx(model.yname, sys.tether_length[3])
+        idx(linmodel.yname, sys.heading_y),
+        # idx(linmodel.yname, sys.winch_force[3]),
+        # idx(linmodel.yname, sys.tether_length[1]),
+        idx(linmodel.yname, sys.tether_length[3]),
+        idx(linmodel.yname, sys.tether_length[2]),
     )
     observed_idxs = vcat(
         # idx(sys, sys.pos[2, kite.num_A]),
-        idx(sys, sys.tether_length[3]),
-        idx(sys, sys.tether_length[2]),
         idx(sys, sys.tether_length[1]),
-        # model.nx + model.ny
+        idx(sys, sys.tether_length[2]),
+        idx(sys, sys.tether_length[3]),
+        # linmodel.nx + linmodel.ny
     )
 
-    Mwt = fill(0.0, model.ny)
-    Mwt[idx(model.yname, sys.heading)] = 0.0
-    Mwt[idx(model.yname, sys.tether_length[3])] = 1.0
-    Nwt = fill(0.1, model.nu)
+    Mwt = fill(0.0, linmodel.ny)
+    Mwt[idx(linmodel.yname, sys.heading_y)] = 100.0
+    Mwt[idx(linmodel.yname, sys.tether_length[3])] = 0.1
+    Nwt = fill(1.0, linmodel.nu)
 
-    σR = fill(0.01, model.ny)
-    σQ = fill(1000/model.nx, model.nx)
-    σQint_u=fill(1, model.nu)
-    nint_u=fill(1, model.nu)
-    estim = ModelPredictiveControl.KalmanFilter(model; nint_u, σQint_u, σQ, σR)
+    σR = fill(1e-4, linmodel.ny)
+    σQ = fill(1e4/linmodel.nx, linmodel.nx)
+    σQint_u=fill(1, linmodel.nu)
+    nint_u=fill(1, linmodel.nu)
+    estim = ModelPredictiveControl.KalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
-    Hp_time, Hc_time = 1.0, 0.2
+    Hp_time, Hc_time = 3.0, 1.0
     Hp, Hc = Int(round(Hp_time / Ts)), Int(round(Hc_time / Ts))
-    optim = JuMP.Model(DAQP.Optimizer)
+    optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=1e9, optim)
 
-    umin, umax = [-1, -1, -1], [1, 1, 1]
-    # Δumin, Δumax = [-0.1, -0.1, -0.], [0.1, 0.1, 0.1]
-    ymin = fill(-Inf, model.ny)
-    ymax = fill(Inf, model.ny)
-    ymin[idx(model.yname, sys.tether_length[1])] = x_0[idx(sys, sys.tether_length[1])] - 0.1
-    ymin[idx(model.yname, sys.tether_length[2])] = x_0[idx(sys, sys.tether_length[2])] - 0.1
-    ymin[idx(model.yname, sys.tether_length[3])] = x_0[idx(sys, sys.tether_length[3])] - 1.0
-    ymax[idx(model.yname, sys.tether_length[1])] = x_0[idx(sys, sys.tether_length[1])] + 1.0
-    ymax[idx(model.yname, sys.tether_length[2])] = x_0[idx(sys, sys.tether_length[2])] + 1.0
-    ymax[idx(model.yname, sys.tether_length[3])] = x_0[idx(sys, sys.tether_length[3])] + 1.0
+    umin, umax = [-0.1, -0.1, -1], [0.1, 0.1, 1]
+    # Δumin, Δumax = [-0.01, -0.01, -0.1], [0.01, 0.01, 0.1]
+    ymin = fill(-Inf, linmodel.ny)
+    ymax = fill(Inf, linmodel.ny)
+    ymin[idx(linmodel.yname, sys.tether_length[1])] = x_0[idx(sys, sys.tether_length[1])] - 0.1
+    ymin[idx(linmodel.yname, sys.tether_length[2])] = x_0[idx(sys, sys.tether_length[2])] - 0.1
+    ymin[idx(linmodel.yname, sys.tether_length[3])] = x_0[idx(sys, sys.tether_length[3])] - 1.0
+    ymax[idx(linmodel.yname, sys.tether_length[1])] = x_0[idx(sys, sys.tether_length[1])] + 0.1
+    ymax[idx(linmodel.yname, sys.tether_length[2])] = x_0[idx(sys, sys.tether_length[2])] + 0.1
+    ymax[idx(linmodel.yname, sys.tether_length[3])] = x_0[idx(sys, sys.tether_length[3])] + 1.0
     # ymin[end] = -1000
     # ymax[end] = 1000
     setconstraint!(mpc; umin, umax, ymin, ymax)
+    # initstate!(mpc, zeros(3), y_0)
 
     U_data, Y_data, Ry_data, X̂_data, X_data = 
-        fill(NaN, model.nu, N), fill(NaN, model.ny, N), fill(NaN, model.ny, N), fill(NaN, model.nx+model.ny, N), fill(NaN, model.nx, N)
-    wanted_outputs = initial_outputs .+ 0.02
-    y_noise = fill(1e-3, model.ny)
+        fill(NaN, linmodel.nu, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.nx+linmodel.ny, N), fill(NaN, linmodel.nx, N)
+    wanted_outputs = y_0 .+ deg2rad(1.0)
+    y_noise = fill(0.0, linmodel.ny)
 
     ci = ControlInterface(
         lin_fun = lin_fun,
         sys = sys,
         inputs = inputs,
         outputs = outputs,
-        initial_outputs = initial_outputs,
+        y_0 = y_0,
         x_0 = x_0,
         p_0 = p_0,
-        model = model,
+        linmodel = linmodel,
+        kite = kite,
         mpc = mpc,
         optim = optim,
         Ts = Ts,
@@ -147,57 +161,36 @@ function reset(ci::ControlInterface)
 
 end
 
-# function lin_ulin_sim(ci::ControlInterface)
-#     println("linear sanity check")
-#     u = [-1, -1, -1]
-#     res = sim!(ci.model, 10, u; x_0 = x_0)
-#     p1 = plot(res; plotx=vcat(idx(sys, sys.tether_length), idx(sys, sys.pos[2, kite.num_A])), ploty=false, plotu=false)
-    
-#     println("nonlinear sanity check")
-#     res = sim!(plant, 10, u; x_0 = x_0)
-#     p2 = plot(res; plotx=vcat(idx(sys, sys.tether_length), idx(sys, sys.pos[2, kite.num_A])), ploty=false, plotu=false)
-#     savefig(plot(p1, p2, layout=(1, 2)), "zeros.png")
-#     @assert false
-# end
+function lin_ulin_sim(ci::ControlInterface)
+    println("linear sanity check")
+    u = [-1, -1, -1]
+    res = sim!(ci.linmodel, 10, u; x_0 = ci.x_0)
+    p1 = plot(res; plotx=ci.observed_idxs, ploty=false, plotu=false)
+    display(p1)
+    # println("nonlinear sanity check")
+    # res = sim!(plant, 10, u; x_0 = ci.x_0)
+    # p2 = plot(res; plotx=ci.observed_idxs, ploty=false, plotu=false)
+    # savefig(plot(p1, p2, layout=(1, 2)), "zeros.png")
+    # @assert false
+end
 
 
-function create_lin_model(ci, x, model=nothing; kwargs...)
-    return create_lin_model(ci.sys, ci.lin_fun, ci.Ts, ci.inputs, ci.outputs, x, ci.p_0, model; kwargs...)
-end
-function create_lin_model(sys, lin_fun, Ts, inputs, outputs, x, p, model=nothing; init_state=true, init_name=true, smooth=0.05)
-    (; A, B, C, D) = linearize(sys, lin_fun, x, p; t=1.0);
-    css = ss(A, B, C, D)
-    dss = c2d(css, Ts, :zoh)
-    if isnothing(model)
-        model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-    else
-        model = LinModel(
-            dss.A*smooth + model.A*(1-smooth), 
-            dss.B*smooth + model.Bu*(1-smooth), 
-            dss.C*smooth + model.C*(1-smooth),
-            model.Bd, model.Dd, model.Ts)
-    end
-    init_state && setstate!(model, x)
-    init_name && setname!(model; u=string.(inputs), y=string.(outputs), x=string.(unknowns(sys)))
-    return model
-end
 
 function step!(ci::ControlInterface, integrator; ry=ci.wanted_outputs)
     x = integrator.u
-    y = ci.get_y(integrator) + ci.y_noise.*randn(ci.model.ny)
+    y = ci.get_y(integrator) .+ ci.y_noise.*randn(ci.linmodel.ny)
     x̂ = preparestate!(ci.mpc, y)
     u = moveinput!(ci.mpc, ry)
-    ci.model = create_lin_model(ci, x, ci.model; init_name=false)
-    setmodel!(ci.mpc, ci.model)
-    # ci.U_data[:,i], ci.Y_data[:,i], ci.Ry_data[:,i], ci.X̂_data[:, i], ci.X_data[:, i] = u, y, ry, x̂, x
+    # ci.linmodel = create_lin_model(ci, x, y, ci.linmodel; init_name=true, smooth=0.0)
+    linearize!(ci, ci.linmodel, x, u, ci.p_0)
+    setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
     pop_append!(ci.Ry_data, ry)
     pop_append!(ci.X̂_data, x̂)
     pop_append!(ci.X_data, x)
-
     updatestate!(ci.mpc, u, y) # update mpc state estimate
-    # updatestate!(ci.plant, u)  # update plant simulator
+    return u
 end
 
 function pop_append!(A::Matrix, vars::Vector)
@@ -210,7 +203,6 @@ end
 function plot_continuously(ci::ControlInterface)
     while ci.plotting
         display(controlplot(ci))
-        sleep(1)
     end
 end
 function live_plot(ci::ControlInterface)
@@ -222,65 +214,18 @@ function stop_plot(ci::ControlInterface) ci.plotting = false end
 
 function controlplot(ci::ControlInterface)
     res = SimResult(ci.mpc, ci.U_data, ci.Y_data; ci.Ry_data, ci.X̂_data, ci.X_data)
-    return Plots.plot(res; plotx=false, ploty=ci.output_idxs, plotu=true)
+    return Plots.plot(res; plotx=false, plotxwithx̂=ci.observed_idxs, ploty=ci.output_idxs, plotu=true)
 end
 
 # function init!(ci::ControlInterface)
 #     # (; A, B, C, D) = linearize(ci.sys, ci.lin_fun, ci.x_0, ci.p_0; t=1.0);
 #     # css = ss(A, B, C, D)
 #     # dss = c2d(css, Ts, :zoh)
-#     # model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-#     # setstate!(model, x_0)
-#     # setname!(model; u=string.(inputs), y=string.(outputs), x=string.(unknowns(sys)))
-#     # model = create_lin_model(ci)
+#     # linmodel = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
+#     # setstate!(linmodel, x_0)
+#     # setname!(linmodel; u=string.(inputs), y=string.(outputs), x=string.(unknowns(sys)))
+#     # linmodel = create_lin_model(ci)
 
     
-# end
-
-# function sim_adapt!(ci::ControlInterface, mpc, sys, model, N, ry, plant, x_0, p_0, y_step=zeros(plant.ny))
-#     U_data, Y_data, Ry_data, X̂_data, X_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx+plant.ny, N), zeros(plant.nx, N)
-#     setstate!(plant, x_0)
-#     initstate!(mpc, zeros(3), plant())
-#     # setstate!(mpc, x_0)
-#     step_time = 0.0
-#     for i = 1:N
-#         Core.println("time = ", i*Ts)
-#         step_time += @elapsed begin
-#             y = plant() + y_step + y_noise.*randn(plant.ny)
-#             x̂ = preparestate!(mpc, y)
-#             u = moveinput!(mpc, ry)
-
-#             # (; A, B, C, D) = linearize(sys, lin_fun, x, p_0; t=1.0);
-#             # css = ss(A, B, C, D)
-#             # dss = c2d(css, Ts, :zoh)
-#             # model = LinModel(
-#             #     dss.A*0.05 + model.A*0.95, 
-#             #     dss.B*0.05 + model.Bu*0.95, 
-#             #     dss.C*0.05 + model.C*0.95, 
-#             #     dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-#             model = create_lin_model(ci, plant.x_0, model)
-#             setmodel!(mpc, model)
-
-#             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:, i], X_data[:, i] = u, y, ry, x̂, x
-#             updatestate!(mpc, u, y) # update mpc state estimate
-#         end
-#         updatestate!(plant, u)  # update plant simulator
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
-#     return res, step_time / N
-# end
-
-# """
-# stepping linear mpc with nonlinear plant
-# """
-# function lin_mpc(ci::ControlInterface)
-#     # estim = ModelPredictiveControl.KalmanFilter(model; σQ, σR, nint_u, σQint_u)
-#     # mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=1e5)
-#     # mpc = setconstraint!(mpc; umin, umax)
-#     ry = initial_outputs .+ 0.02
-#     res, step_time = sim_adapt!(ci, mpc, sys, model, N, ry, plant, x_0, p_0)
-#     display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=observed_idxs))
-#     println("Times realtime: ", Ts / step_time)
-# end
 
 end
