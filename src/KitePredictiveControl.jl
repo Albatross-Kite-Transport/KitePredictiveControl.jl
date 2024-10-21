@@ -107,14 +107,14 @@ function ControlInterface(kite; Ts = 0.05, init_set_values = zeros(3))
     Lwt = fill(0.1, linmodel.nu)
 
     σR = fill(1e-4, linmodel.ny)
-    σQ = fill(1e4/linmodel.nx, linmodel.nx)
+    σQ = fill(10, linmodel.nx)
     σQint_u=fill(1, linmodel.nu)
     nint_u=fill(1, linmodel.nu)
-    estim = ModelPredictiveControl.KalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
+    estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
     # Hp_time, Hc_time = 1.0, Ts
     # Hp, Hc = Int(round(Hp_time / Ts)), Int(round(Hc_time / Ts))
-    Hp, Hc = 100, 2
+    Hp, Hc = 10, 2
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
@@ -138,9 +138,9 @@ function ControlInterface(kite; Ts = 0.05, init_set_values = zeros(3))
         fill(NaN, linmodel.nu, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.nx+linmodel.ny, N), fill(NaN, linmodel.nx, N)
     wanted_outputs = y_0
     wanted_outputs[idx(linmodel.yname, sys.heading_y)] = deg2rad(0.0)
-    wanted_outputs[idx(linmodel.yname, sys.depower)] = 0.45
+    wanted_outputs[idx(linmodel.yname, sys.depower)] = 0.48
     # wanted_outputs[idx(linmodel.yname, sys.tether_length[3])] = 
-    y_noise = fill(0.0, linmodel.ny)
+    y_noise = fill(0.01, linmodel.ny)
 
     ci = ControlInterface(
         lin_fun = lin_fun,
@@ -175,9 +175,9 @@ end
 
 function lin_ulin_sim(ci::ControlInterface)
     println("linear sanity check")
-    u = [-1, -1, -1]
+    u = [-0, -50, -70]
     res = sim!(ci.linmodel, 10, u; x_0 = ci.x_0)
-    p1 = plot(res; plotx=ci.observed_idxs, ploty=false, plotu=false)
+    p1 = plot(res; plotx=ci.observed_idxs, ploty=ci.output_idxs, plotu=false, size=(900, 900))
     display(p1)
     # println("nonlinear sanity check")
     # res = sim!(plant, 10, u; x_0 = ci.x_0)

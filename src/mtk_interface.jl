@@ -28,7 +28,7 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
 end
 
 function get_next_state(kite::KPS4_3L, x, u, Ts)
-    OrdinaryDiffEqCore.reinit!(kite.integrator, x)
+    OrdinaryDiffEqCore.reinit!(kite.integrator, x; t0=1.0, tf=1.0+Ts)
     next_step!(kite; set_values = u, dt = Ts)
     return kite.integrator.u
 end
@@ -38,7 +38,7 @@ function linearize!(ci::ControlInterface, linmodel, x, u, p)
 end
 function linearize(kite::KPS4_3L, sys, lin_fun, get_y, x::Vector{Float64}, 
             u::Vector{Float64}, p::MTKParameters, Ts; linmodel = nothing, t = 1.0, allow_input_derivatives = false)
-    linres = lin_fun(x, p, t) # TODO: u0 is not the same as x0??
+    linres = lin_fun(x, p, t)
     f_x, f_z, g_x, g_z, f_u, g_u, h_x, h_z, h_u = linres
     nx, nu = size(f_u)
     ny = size(h_x, 1)
@@ -85,6 +85,16 @@ function linearize(kite::KPS4_3L, sys, lin_fun, get_y, x::Vector{Float64},
     linmodel.yop .= get_y(kite.integrator)
     linmodel.xop .= x
     linmodel.fop .= get_next_state(kite, x, u, Ts)
+
+    der_x = css.A * x + css.B * u
+    x_next_lin = dss.A * x + dss.B * u
+    @show Ts
+    @show norm(x .- linmodel.fop)
+    @show norm(x .- x_next_lin)
+    @show norm(der_x)
+    @show u
+    # @show x
+    @assert false
     # --- reset the state of the linear model ---
     linmodel.x0 .= 0 # state deviation vector is always x0=0 after a linearization
     return linmodel
