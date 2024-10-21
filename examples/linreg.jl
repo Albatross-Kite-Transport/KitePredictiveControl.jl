@@ -3,11 +3,6 @@ using Statistics
 using Random
 using BenchmarkTools
 
-# Function to perform linear regression
-function linear_regression(X, Y)
-    return (X' * X) \ (X' * Y)
-end
-
 # Set dimensions
 nx = 70  # number of state variables
 nu = 3   # number of input variables
@@ -18,13 +13,14 @@ Random.seed!(123)
 
 # True A and B matrices (for demonstration)
 A_true = rand(nx, nx)
-A_true ./= 10  # Scale down to ensure stability
+# A_true ./= 10  # Scale down to ensure stability
 B_true = rand(nx, nu)
 
 # Generate data
-X = randn(N, nx)
+X = randn(N, nx)  # Single initial state
+# X_repeated = repeat(X', N)
 U = randn(N, nu)
-Y = zeros(N, nx)
+Y = randn(N, nx)
 
 # Generate Y data
 for i in 1:N
@@ -34,16 +30,14 @@ end
 # Add some noise
 Y += 0.01 * randn(size(Y))
 
-# Concatenate X and U
-X_augmented = hcat(X, U)
-
-# Perform linear regression
+# Estimate A and B
 println("Starting regression...")
-@time coefficients = linear_regression(X_augmented, Y)
-
-# Extract A and B from the coefficients
-A_estimated = coefficients[1:nx, :]'
-B_estimated = coefficients[nx+1:end, :]'
+@time begin
+    XU = hcat(X, U)
+    AB_estimated = (XU' * XU) \ (XU' * Y)
+    A_estimated = AB_estimated[1:nx, :]'
+    B_estimated = AB_estimated[nx+1:end, :]'
+end
 
 # Function to print matrix statistics
 function print_matrix_stats(mat, name)
@@ -66,8 +60,8 @@ println("\nMean Squared Error for A: ", mse_A)
 println("Mean Squared Error for B: ", mse_B)
 
 # Test the model
-test_X = randn(nx)
 test_U = randn(nu)
+test_X = randn(nx)
 true_Y = A_true * test_X + B_true * test_U
 estimated_Y = A_estimated * test_X + B_estimated * test_U
 

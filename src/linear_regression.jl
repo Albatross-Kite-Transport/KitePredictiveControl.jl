@@ -4,32 +4,39 @@ using Random
 using BenchmarkTools
 using KiteModels
 
-# Function to perform linear regression
+Ts = 0.05
+if !@isdefined kite
+    kite = KPS4_3L(KCU(se("system_3l.yaml")))
+end
+init_set_values = [-0.1, -0.1, -70.0]
+init_sim!(kite; prn=true, torque_control=true, init_set_values)
+x0 = copy(kite.integrator.u)
+
 function linear_regression(X, Y)
     return (X' * X) \ (X' * Y)
+end
+
+function x_plus!(kite::KPS4_3L, x, u, Ts)
+    OrdinaryDiffEqCore.reinit!(kite.integrator, x; t0=1.0, tf=1.0+Ts)
+    next_step!(kite; set_values = u, dt = Ts)
+    return kite.integrator.u
 end
 
 # Set dimensions
 nx = 70  # number of state variables
 nu = 3   # number of input variables
-N = 73  # number of data points
-
-# Generate some example data
-Random.seed!(123)
-
-# True A and B matrices (for demonstration)
-A_true = rand(nx, nx)
-A_true ./= 10  # Scale down to ensure stability
-B_true = rand(nx, nu)
+N = nx+nu  # number of data points
 
 # Generate data
-X = randn(N, nx)
-U = randn(N, nu)
-Y = zeros(N, nx)
+X = zeros(N, nx)
+U = zeros(N, nu)
+X_plus = zeros(N, nx)
 
 # Generate Y data
 for i in 1:N
-    Y[i, :] = A_true * X[i, :] + B_true * U[i, :]
+    # Y[i, :] = A_true * X[i, :] + B_true * U[i, :]
+    x_plus!(kite, x0, U[])
+    X_plus[i, :] .= 
 end
 
 # Add some noise
