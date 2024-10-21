@@ -4,7 +4,7 @@ using ModelPredictiveControl
 using ModelingToolkit
 using ModelingToolkit: D_nounits as D, t_nounits as t
 using KiteModels, Plots, Serialization, JuliaSimCompiler, OrdinaryDiffEq, ForwardDiff, RuntimeGeneratedFunctions, LinearAlgebra
-using JuMP, DAQP, MadNLP
+using JuMP, DAQP, MadNLP, SeeToDee, NonlinearSolve
 daqp = Model(DAQP.Optimizer, add_bridges=false)
 
 # export run_controller
@@ -26,26 +26,17 @@ outputs = vcat(
     reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
     vcat(kite_model.tether_length)
 )
-initial_outputs = vcat(
-    vcat(kite.flap_angle), 
-    reduce(vcat, kite.pos[1:kite.num_flap_C]), 
-    reduce(vcat, kite.pos[kite.num_flap_D+1:kite.num_A]),
-    vcat(kite.tether_lengths)
-)
+get_y = ModelingToolkit.getu(kite.integrator.sol, outputs)
+initial_outputs = get_y(kite.integrator)
+x_0 = deepcopy(kite.integrator.u)
 
 (f_ip, dvs, psym, io_sys) = get_control_function(kite_model, inputs)
-f!, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym)
+f, (h!, nu, ny, nx, vu, vy, vx) = generate_f_h(io_sys, inputs, outputs, f_ip, dvs, psym, x_0)
 
-[defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
-[defaults(io_sys)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
-[defaults(io_sys)[kite_model.flap_angle[i]] = kite.flap_angle[i] for i in 1:2]
-[defaults(io_sys)[kite_model.tether_length[i]] = kite.tether_lengths[i] for i in 1:3]
-
-x_0 = JuliaSimCompiler.initial_conditions(io_sys, defaults(io_sys), psym)[1]
 
 Ts = 1e-2
 N = 300
-model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny, solver=RungeKutta(4; supersample=Int(1e5*Ts))); u=vu, x=vx, y=vy)
+model = setname!(NonLinModel(f, h!, Ts, nu, nx, ny, solver=nothing); u=vu, x=vx, y=vy)
 setstate!(model, x_0)
 
 # println("sanity check")
@@ -65,6 +56,7 @@ Nwt = fill(1/gain, nu)
 
 println("linearize")
 # if !@isdefined linmodel
+    @time linmodel = ModelPredictiveControl.linearize(model)
     @time linmodel = ModelPredictiveControl.linearize(model)
     println("sanity check")
     u = [100, 100, -100]
