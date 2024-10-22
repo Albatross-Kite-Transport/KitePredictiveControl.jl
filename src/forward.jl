@@ -1,6 +1,7 @@
 # https://juliacontrol.github.io/ControlSystems.jl/stable/examples/automatic_differentiation/
 
-using ControlSystemsBase, ForwardDiff, KiteModels, PreallocationTools, OrdinaryDiffEqCore, OrdinaryDiffEqBDF
+using ControlSystemsBase, ForwardDiff, KiteModels, PreallocationTools, OrdinaryDiffEqCore, OrdinaryDiffEqBDF, BenchmarkTools, ModelingToolkit
+using ForwardDiff: Dual, JacobianConfig
 
 Ts = 0.05
 if !@isdefined kite
@@ -11,33 +12,41 @@ init_set_values = [-0.1, -0.1, -70.0]
 init_sim!(kite; prn=true, torque_control=true, init_set_values)
 next_step!(kite; set_values = init_set_values, dt = 1.0)
 
-sym_model, inputs = model!(kite, kite.pos, kite.vel)
-@time KiteModels.ModelingToolkit.generate_control_function(sym_model, inputs)
-@time KiteModels.ModelingToolkit.generate_control_function(sym_model, inputs)
+x0 = kite.integrator.u
+u0 = init_set_values
+nx = length(x0)
+nu = length(u0)
 
 solver = QNDF()
-lbc = GeneralLazyBufferCache(function (x)
-    println("creating prob")
-    @time integ = OrdinaryDiffEqCore.init(ODEProblem(kite.simple_sys, x, (0.0, Ts)), solver; saveat=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol)
-    return integ
-end)
+# if !@isdefined(lbc)
+    lbc = GeneralLazyBufferCache(function (xu)
+        OrdinaryDiffEqCore.init(ODEProblem(kite.simple_sys, xu[1:nx], (0.0, Ts), p=(kite.simple_sys.set_values => xu[nx+1:end])), solver; 
+                            saveat=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol)
+    end)
+# end
 
 "Nonlinear discrete dynamics"
 function next_step(x, u, integrator)
     OrdinaryDiffEqCore.reinit!(integrator, x; t0=1.0, tf=1.0+Ts)
+    kite.set_set_values(integrator, u)
     solve!(integrator)
     return integrator.u
 end
-f = (x, u) -> next_step(x, u, lbc[x])
-
-
-x0 = kite.integrator.u
-u0 = init_set_values
+f(x, u) = next_step(x, u, lbc[vcat(x, u)])
 
 println("linearizing")
-@time A = ForwardDiff.jacobian(x -> f(x, u0), x0)
-@time A = ForwardDiff.jacobian(x -> f(x, u0), x0)
-@time B = ForwardDiff.jacobian(u -> f(x0, u), u0)
+# if !@isdefined(cfg_a)
+    f_a = x -> f(x, u0)
+    cfg_a = JacobianConfig(f_a, x0)
+# end
+# if !@isdefined(cfg_b)
+    f_b = u -> f(x0, u)
+    cfg_b = JacobianConfig(f_b, u0)
+# end
+@time A = ForwardDiff.jacobian(f_a, x0, cfg_a)
+@time A = ForwardDiff.jacobian(f_a, x0, cfg_a)
+@time B = ForwardDiff.jacobian(f_b, u0, cfg_b)
+@time B = ForwardDiff.jacobian(f_b, u0, cfg_b)
 
 # "An example of a nonlinear output (measurement) function"
 # function g(x, u)
@@ -48,6 +57,8 @@ println("linearizing")
 # D = ForwardDiff.jacobian(u -> g(x0, u), u0)
 
 # linear_sys = ss(A, B, C, D)
+
+
 
 
 

@@ -229,6 +229,11 @@ function controlplot(ci::ControlInterface)
     return Plots.plot(res; plotx=false, plotxwithx̂=ci.observed_idxs, ploty=ci.output_idxs, plotu=true, size=(1200, 900))
 end
 
+
+function live_linearize(ci::ControlInterface)
+    # TODO: threads spawn linearize on new x
+end
+
 # function init!(ci::ControlInterface)
 #     # (; A, B, C, D) = linearize(ci.sys, ci.lin_fun, ci.x_0, ci.p_0; t=1.0);
 #     # css = ss(A, B, C, D)
