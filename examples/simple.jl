@@ -1,6 +1,6 @@
 using Revise, KitePredictiveControl, KiteModels, ControlPlots
 
-Ts = 1e-2
+Ts = 0.1
 if !@isdefined kite_real
     kite_real = KPS4_3L(KCU(se("system_3l.yaml")))
     kite_model = KPS4_3L(KCU(se("system_3l.yaml"))) # TODO: different sim vs real system
@@ -12,7 +12,7 @@ init_sim!(kite_model; prn=true, torque_control=true, init_set_values)
 next_step!(kite_real; set_values = init_set_values, dt = 1.0)
 next_step!(kite_model; set_values = init_set_values, dt = 1.0)
 
-ci = ControlInterface(kite_model; Ts, init_set_values)
+ci = ControlInterface(kite_model; Ts, u0=init_set_values)
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
 
 function wanted_heading_y(t)

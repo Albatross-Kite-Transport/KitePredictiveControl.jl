@@ -5,26 +5,35 @@ MTK = ModelingToolkit
 #     return (f_ip, dvs, psym, io_sys)
 # end
 
-function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
-    get_out = getu(kite.integrator.sol, outputs)
+function generate_f_h(kite::KPS4_3L, outputs, Ts)
+    get_y = getu(kite.integrator.sol, outputs)
+    nu = 3
+    nx = length(kite.integrator.u)
+    ny = length(outputs)
 
-    function f!(next_state, state, input, _, _)
-        # @show kite.prob.u0
-        # prob = remake(kite.prob; u0 = state, p = [kite.simple_sys.set_values => input], tspan=(0.0, Ts))
-        # @show prob.u0
-        # sol = OrdinaryDiffEqCore.solve(prob, solver; saveat=0.1, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol);
-        OrdinaryDiffEqCore.reinit!(kite.integrator, state)
-        kite.set_set_values(kite.integrator, input)
-        OrdinaryDiffEqCore.step!(kite.integrator, Ts, true)
-        next_state .= kite.integrator.u
+    solver = OrdinaryDiffEqBDF.QBDF()
+    "Nonlinear discrete dynamics"
+    function next_step!(x_plus, x, u, prob)
+        ps = parameter_values(prob)
+        ps = SciMLStructures.replace(SciMLStructures.Tunable(), ps, vcat(x, u))
+        newprob = OrdinaryDiffEqCore.remake(prob; p=ps, tspan=(0.0, Ts))
+        sol = solve(newprob, solver; saveat=Ts)
+        x_plus .= sol.u[end]
         nothing
     end
-    function h!(outputs, state, _, _)
-        OrdinaryDiffEqCore.reinit!(kite.integrator, state)
-        outputs .= get_out(kite.integrator)
+    f!(x_plus, x, u, _, _) = next_step!(x_plus, x, u, kite.prob)
+
+    "Observer function"
+    function get_y!(y, x, prob)
+        ps = parameter_values(prob)
+        ps = SciMLStructures.replace(SciMLStructures.Tunable(), ps, x)
+        newprob = OrdinaryDiffEqCore.remake(prob; p=ps, tspan=(0.0, Ts))
+        y .= get_y(newprob)
         nothing
     end
-    return f!, h!
+    h!(y, x, _, _) = get_y!(y, x, kite.prob)
+
+    return f!, h!, get_y!, nu, nx, ny
 end
 
 function get_next_state(kite::KPS4_3L, x, u, Ts)
