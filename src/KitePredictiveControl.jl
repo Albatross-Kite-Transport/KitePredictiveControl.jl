@@ -12,6 +12,7 @@ using SciMLStructures
 using ModelingToolkit: variable_index as idx
 import ModelingToolkit.SciMLBase: successful_retcode
 using PreallocationTools
+using Statistics
 # import RobustAndOptimalControl: named_ss
 
 export step!, controlplot, live_plot, stop_plot
@@ -113,7 +114,7 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     Lwt = fill(0.1, linmodel.nu)
 
     σR = fill(1e-4, linmodel.ny)
-    σQ = fill(10, linmodel.nx)
+    σQ = fill(1e4, linmodel.nx)
     σQint_u=fill(1, linmodel.nu)
     nint_u=fill(1, linmodel.nu)
     estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
@@ -204,6 +205,8 @@ function step!(ci::ControlInterface, y; ry=ci.wanted_outputs)
     x̂ = preparestate!(ci.mpc, y)
     u = moveinput!(ci.mpc, ry)
     ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x=x̂[1:ci.linmodel.nx], u)
+    @show mean(ci.linmodel.fop .- ci.linmodel.xop)
+    @show mean((ci.linmodel.A * ci.linmodel.xop + ci.linmodel.Bu * ci.linmodel.uop) .- ci.linmodel.xop)
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)

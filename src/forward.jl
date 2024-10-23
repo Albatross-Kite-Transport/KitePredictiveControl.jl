@@ -15,6 +15,20 @@ init_set_values = [-0.1, -0.1, -70.0]
 init_sim!(kite; prn=true, torque_control=true, init_set_values)
 # next_step!(kite; set_values = init_set_values, dt = 1.0)
 
+outputs = vcat(
+        vcat(sys.flap_angle), 
+        reduce(vcat, collect(sys.pos[:, 4:kite.num_flap_C-1])), 
+        reduce(vcat, collect(sys.pos[:, kite.num_flap_D+1:kite.num_A])),
+        vcat(sys.tether_length),
+        sys.heading_y,
+        sys.depower,
+        # sys.winch_force[3]
+    )
+
+sys_model, inputs = model!(kite, kite.pos, kite.vel)
+par = Dict(vcat([sys.set_values[i] => init_set_values[i] for i in 1:3]))
+(; A, B) = ModelingToolkit.linearize(sys_model, inputs, outputs; op = merge(create_default(x), par))
+
 x0 = copy(kite.integrator.u)
 x = x0
 u0 = init_set_values
@@ -88,6 +102,11 @@ println("B")
 @time B = ForwardDiff.jacobian(f_b, u0)
 println("B")
 @time B = ForwardDiff.jacobian(f_b, u0)
+
+
+@show mean(f(x0, u0) .- x0)
+@show mean((A * x0 + B * u0) .- x0)
+@show mean((A_ * x0 + B_ * u0) .- x0)
 
 # "An example of a nonlinear output (measurement) function"
 # function g(x, u)
