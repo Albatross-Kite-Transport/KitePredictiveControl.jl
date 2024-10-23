@@ -1,6 +1,7 @@
 module KitePredictiveControl
 
 using ModelPredictiveControl
+using PrecompileTools: @setup_workload, @compile_workload 
 using ModelingToolkit
 using KiteModels, ControlSystems, Serialization, OrdinaryDiffEqCore, OrdinaryDiffEqBDF, 
         RuntimeGeneratedFunctions, LinearAlgebra, SymbolicIndexingInterface, Plots, Base.Threads
@@ -9,6 +10,8 @@ using ControlSystemIdentification, ControlSystemsBase, Parameters
 using SymbolicIndexingInterface: parameter_values, state_values
 using SciMLStructures
 using ModelingToolkit: variable_index as idx
+import ModelingToolkit.SciMLBase: successful_retcode
+using PreallocationTools
 # import RobustAndOptimalControl: named_ss
 
 export step!, controlplot, live_plot, stop_plot
@@ -45,7 +48,6 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     output_idxs::Vector{Int}
     observed_idxs::Vector{Int}
     y_noise::Vector{Float64}
-    get_y::Union{SymbolicIndexingInterface.MultipleGetters, SymbolicIndexingInterface.TimeDependentObservedFunction}
     plotting::Bool = true
 end
 
@@ -64,26 +66,22 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
         sym_model.depower,
         # sym_model.winch_force[3]
     )
-    sys = kite.integrator.f.sys
+    sys = kite.prob.f.sys
 
     # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, nu, nx, ny = generate_f_h(kite, outputs, Ts)
+    f!, h!, nu, nx, ny = generate_f_h(kite, inputs, outputs, Ts)
     nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
     setname!(nonlinmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
     # --- linearize model ---
     x0 = deepcopy(kite.integrator.u)
     p0 = deepcopy(kite.integrator.p)
-    @show nonlinmodel.buffer.d .- nonlinmodel.dop
     @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0)
     @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0) # TODO: use sparse
-    @show linmodel.A
-    @show linmodel.Bu
-    # setname!(linmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
+    # --- initialize outputs ---
     y0 = zeros(ny)
-    y0 = h!(y0, x0, nothing, nothing)
-    # lin_fun, sys = ModelingToolkit.linearization_function(sym_model, inputs, outputs)
+    h!(y0, x0, nothing, nothing)
 
     time = 20 # amount of time to be saved in data buffer
     N = Int(round(time / Ts))
@@ -122,7 +120,7 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
 
     # Hp_time, Hc_time = 1.0, Ts
     # Hp, Hc = Int(round(Hp_time / Ts)), Int(round(Hc_time / Ts))
-    Hp, Hc = 10, 2
+    Hp, Hc = 20, 2
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
@@ -175,8 +173,7 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
         wanted_outputs = wanted_outputs,
         output_idxs = output_idxs,
         observed_idxs = observed_idxs,
-        y_noise = y_noise,
-        get_y = get_y
+        y_noise = y_noise
     )
     return ci
 end
@@ -194,33 +191,27 @@ function lin_ulin_sim(ci::ControlInterface)
     println("linear sanity check")
     u = [-0, -50, -70]
     res = sim!(ci.linmodel, 10, u; x0 = ci.x0)
-    p1 = plot(res; plotx=ci.observed_idxs, ploty=ci.output_idxs, plotu=false, size=(900, 900))
+    p1 = plot(res; plotx=false, ploty=ci.output_idxs, plotu=false, size=(900, 900))
     display(p1)
     # println("nonlinear sanity check")
     # res = sim!(plant, 10, u; x0 = ci.x0)
-    # p2 = plot(res; plotx=ci.observed_idxs, ploty=false, plotu=false)
+    # p2 = plot(res; plotx=false, ploty=false, plotu=false)
     # savefig(plot(p1, p2, layout=(1, 2)), "zeros.png")
     # @assert false
 end
 
-
-
-function step!(ci::ControlInterface, integrator; ry=ci.wanted_outputs)
-    x = ci.nonlinmodel.xop
-    @show x
-    y = ci.nonlinmodel() .+ ci.y_noise.*randn(ci.linmodel.ny)
+function step!(ci::ControlInterface, y; ry=ci.wanted_outputs)
     x̂ = preparestate!(ci.mpc, y)
     u = moveinput!(ci.mpc, ry)
-    # ci.linmodel = create_lin_model(ci, x, y, ci.linmodel; init_name=true, smooth=0.0)
-    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x, u)
+    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x=x̂[1:ci.linmodel.nx], u)
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
     pop_append!(ci.Ry_data, ry)
     pop_append!(ci.X̂_data, x̂)
-    pop_append!(ci.X_data, x)
+    # pop_append!(ci.X_data, x)
     updatestate!(ci.mpc, u, y)
-    updatestate!(ci.nonlinmodel, u, y)
+    # updatestate!(ci.nonlinmodel, u)
     return u
 end
 
@@ -261,6 +252,16 @@ end
 #     # setstate!(linmodel, x0)
 #     # setname!(linmodel; u=string.(inputs), y=string.(outputs), x=string.(unknowns(sys)))
 #     # linmodel = create_lin_model(ci)
+
+@setup_workload begin
+    @compile_workload begin
+        init_set_values=[-0.1, -0.1, -70.0]
+        kite_model = KPS4_3L(KCU(se("system_3l.yaml")))
+        init_sim!(kite_model; prn=true, torque_control=true, init_set_values)
+        ci = ControlInterface(kite_model; Ts=0.05, u0=init_set_values)
+        nothing
+    end
+end
 
     
 

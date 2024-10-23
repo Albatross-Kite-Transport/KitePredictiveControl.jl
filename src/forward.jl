@@ -4,6 +4,7 @@ using ControlSystemsBase, ForwardDiff, KiteModels, PreallocationTools, OrdinaryD
 using ForwardDiff: Dual, JacobianConfig
 using SymbolicIndexingInterface: parameter_values, state_values, setp, setu
 using SciMLStructures
+import ModelingToolkit.SciMLBase: successful_retcode
 
 Ts = 0.05
 if !@isdefined kite
@@ -59,7 +60,7 @@ create_default = make_default_creator(sys)
 "Nonlinear discrete dynamics"
 function next_step(x, u, integ_setu_pair)
     (integ, setu!) = integ_setu_pair
-    reinit!(integ, x)
+    reinit!(integ, x; t0=1.0, tf=1.0+Ts)
     setu!(integ, u)
     OrdinaryDiffEqCore.step!(integ, Ts, true)
     @assert successful_retcode(integ.sol)
