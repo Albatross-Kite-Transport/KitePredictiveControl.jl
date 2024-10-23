@@ -67,8 +67,8 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     sys = kite.integrator.f.sys
 
     # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, get_y!, nu, nx, ny = generate_f_h(kite, outputs, Ts)
-    nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny)
+    f!, h!, nu, nx, ny = generate_f_h(kite, outputs, Ts)
+    nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
     setname!(nonlinmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
     # --- linearize model ---
@@ -78,18 +78,15 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0)
     @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0) # TODO: use sparse
     @show linmodel.A
+    @show linmodel.Bu
+    # setname!(linmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
-    y0 = get_y!(kite.integrator)
+    y0 = zeros(ny)
+    y0 = h!(y0, x0, nothing, nothing)
     # lin_fun, sys = ModelingToolkit.linearization_function(sym_model, inputs, outputs)
 
-    time = 20 # amount of time to be saved
+    time = 20 # amount of time to be saved in data buffer
     N = Int(round(time / Ts))
-    # solver = QNDF(autodiff=false)
-    # kite.integrator = OrdinaryDiffEqCore.init(kite.prob, solver; dt=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol, save_on=false)
-    # init_sim!(kite; prn=true, torque_control=kite.torque_control)
-
-    linmodel = linearize(kite, sys, lin_fun, get_y, x0, init_set_values, p0, Ts)
-    setname!(linmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
     output_idxs = vcat(
         idx(linmodel.yname, sys.heading_y),
@@ -145,13 +142,18 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     setconstraint!(mpc; umin, umax, ymin, ymax)
     # initstate!(mpc, zeros(3), y0)
 
-    U_data, Y_data, Ry_data, X̂_data, X_data = 
-        fill(NaN, linmodel.nu, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.ny, N), fill(NaN, linmodel.nx+linmodel.ny, N), fill(NaN, linmodel.nx, N)
+    # --- init data ---
+    U_data = fill(NaN, linmodel.nu, N)
+    Y_data = fill(NaN, linmodel.ny, N)
+    Ry_data = fill(NaN, linmodel.ny, N)
+    X̂_data = fill(NaN, linmodel.nx + linmodel.ny, N)
+    X_data = fill(NaN, linmodel.nx, N)
+
     wanted_outputs = y0
     wanted_outputs[idx(linmodel.yname, sys.heading_y)] = deg2rad(0.0)
     wanted_outputs[idx(linmodel.yname, sys.depower)] = 0.48
     # wanted_outputs[idx(linmodel.yname, sys.tether_length[3])] = 
-    y_noise = fill(0.01, linmodel.ny)
+    y_noise = fill(1e-3, linmodel.ny)
 
     ci = ControlInterface(
         inputs = inputs,
@@ -179,8 +181,13 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     return ci
 end
 
-function reset(ci::ControlInterface)
-
+function reset(ci::ControlInterface, x0)
+    ci.U_data .= NaN
+    ci.Y_data .= NaN
+    ci.Ry_data .= NaN
+    ci.X̂_data .= NaN
+    ci.X_data .= NaN
+    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel)
 end
 
 function lin_ulin_sim(ci::ControlInterface)
@@ -205,7 +212,7 @@ function step!(ci::ControlInterface, integrator; ry=ci.wanted_outputs)
     x̂ = preparestate!(ci.mpc, y)
     u = moveinput!(ci.mpc, ry)
     # ci.linmodel = create_lin_model(ci, x, y, ci.linmodel; init_name=true, smooth=0.0)
-    linearize!(ci, ci.linmodel, x, u, ci.p0)
+    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x, u)
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)

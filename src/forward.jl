@@ -2,7 +2,7 @@
 
 using ControlSystemsBase, ForwardDiff, KiteModels, PreallocationTools, OrdinaryDiffEqCore, OrdinaryDiffEqBDF, BenchmarkTools, ModelingToolkit
 using ForwardDiff: Dual, JacobianConfig
-using SymbolicIndexingInterface: parameter_values, state_values
+using SymbolicIndexingInterface: parameter_values, state_values, setp, setu
 using SciMLStructures
 
 Ts = 0.05
@@ -14,12 +14,14 @@ init_set_values = [-0.1, -0.1, -70.0]
 init_sim!(kite; prn=true, torque_control=true, init_set_values)
 # next_step!(kite; set_values = init_set_values, dt = 1.0)
 
-x0 = kite.integrator.u
+x0 = copy(kite.integrator.u)
+x = x0
 u0 = init_set_values
 nx = length(x0)
 nu = length(u0)
+sys = kite.prob.f.sys
 
-set_idx = ModelingToolkit.variable_index(kite.integrator, :set_values)
+idxs = [ModelingToolkit.parameter_index(kite.prob, sys.set_values[i]).idx for i in 1:3]
 
 solver = QNDF()
 # if !@isdefined(integrator)
@@ -42,12 +44,26 @@ solver = QNDF()
     # )
 # end
 
+function make_default_creator(sys)
+    keys = collect(unknowns(sys))
+    return x -> Dict(k => x[i] for (i, k) in enumerate(keys))
+end
+
+creator = make_default_creator(sys)
+@time default = creator(x)
+
+
+setu! = setp(sys, [sys.set_values[i] for i in 1:3])
 "Nonlinear discrete dynamics"
 function next_step(x, u, prob)
-    ps = parameter_values(prob)
-    ps = SciMLStructures.replace(SciMLStructures.Tunable(), ps, vcat(x, u))
-    newprob = OrdinaryDiffEqCore.remake(prob; p=ps, tspan=(0.0, Ts))
-    sol = solve(newprob, solver; saveat=Ts)
+    # ps = parameter_values(prob)
+    # new_ps = convert(Base.promote_type(typeof(x), typeof(u)), ps.tunable)
+    # new_ps[idxs] .= u
+    setu!(prob, u)
+    # ps = SciMLStructures.replace(SciMLStructures.Tunable(), ps, new_ps)
+    newprob = OrdinaryDiffEqCore.remake(prob; u0=creator(x), tspan=(0.0, Ts))
+
+    sol = solve(newprob, solver; u0=creator(x), save_start = true, saveat=Ts, initializealg=false)
     return sol.u[end]
 end
 f(x, u) = next_step(x, u, kite.prob)

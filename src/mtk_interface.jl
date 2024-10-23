@@ -33,7 +33,7 @@ function generate_f_h(kite::KPS4_3L, outputs, Ts)
     end
     h!(y, x, _, _) = get_y!(y, x, kite.prob)
 
-    return f!, h!, get_y!, nu, nx, ny
+    return f!, h!, nu, nx, ny
 end
 
 function get_next_state(kite::KPS4_3L, x, u, Ts)
