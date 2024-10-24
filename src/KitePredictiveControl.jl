@@ -15,8 +15,9 @@ using PreallocationTools
 using Statistics
 # import RobustAndOptimalControl: named_ss
 
-export step!, controlplot, live_plot, stop_plot
+export step!, controlplot, start_processes, stop_processes
 export ControlInterface
+
 
 set_data_path(joinpath(@__DIR__, "..", "data"))
 @with_kw mutable struct ControlInterface
@@ -50,6 +51,15 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     observed_idxs::Vector{Int}
     y_noise::Vector{Float64}
     plotting::Bool = true
+    linearized_channel::Channel{ModelPredictiveControl.LinMPC} = Channel{ModelPredictiveControl.LinMPC}(1)
+    stepped_channel::Channel{Tuple{ModelPredictiveControl.LinMPC, 
+                                ModelPredictiveControl.LinModel, 
+                                ModelPredictiveControl.NonLinModel, 
+                                Vector{Float64}, Vector{Float64}}} =
+                    Channel{Tuple{ModelPredictiveControl.LinMPC, 
+                                ModelPredictiveControl.LinModel, 
+                                ModelPredictiveControl.NonLinModel, 
+                                Vector{Float64}, Vector{Float64}}}(1)
 end
 
 include("mtk_interface.jl")
@@ -75,10 +85,9 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     setname!(nonlinmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
 
     # --- linearize model ---
-    x0 = deepcopy(kite.integrator.u)
-    p0 = deepcopy(kite.integrator.p)
-    @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0)
-    @time linmodel = ModelPredictiveControl.linearize(nonlinmodel, x=x0, u=u0) # TODO: use sparse
+    x0 = kite.integrator.u
+    p0 = kite.integrator.p
+    @time linmodel = ModelPredictiveControl.linearize(nonlinmodel; x=x0, u=u0)
 
     # --- initialize outputs ---
     y0 = zeros(ny)
@@ -114,14 +123,14 @@ function ControlInterface(kite; Ts = 0.05, u0 = zeros(3))
     Lwt = fill(0.1, linmodel.nu)
 
     σR = fill(1e-4, linmodel.ny)
-    σQ = fill(1e4, linmodel.nx)
+    σQ = fill(1e2, linmodel.nx)
     σQint_u=fill(1, linmodel.nu)
     nint_u=fill(1, linmodel.nu)
     estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
     # Hp_time, Hc_time = 1.0, Ts
     # Hp, Hc = Int(round(Hp_time / Ts)), Int(round(Hc_time / Ts))
-    Hp, Hc = 20, 2
+    Hp, Hc = 40, 2
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
@@ -204,17 +213,19 @@ end
 function step!(ci::ControlInterface, y; ry=ci.wanted_outputs)
     x̂ = preparestate!(ci.mpc, y)
     u = moveinput!(ci.mpc, ry)
-    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x=x̂[1:ci.linmodel.nx], u)
-    @show mean(ci.linmodel.fop .- ci.linmodel.xop)
-    @show mean((ci.linmodel.A * ci.linmodel.xop + ci.linmodel.Bu * ci.linmodel.uop) .- ci.linmodel.xop)
-    setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
     pop_append!(ci.Ry_data, ry)
     pop_append!(ci.X̂_data, x̂)
-    # pop_append!(ci.X_data, x)
     updatestate!(ci.mpc, u, y)
+
     # updatestate!(ci.nonlinmodel, u)
+    if isready(ci.linearized_channel)
+        ci.mpc = take!(ci.linearized_channel)
+    end
+    if !isready(ci.stepped_channel)
+        put!(ci.stepped_channel, (ci.mpc, ci.linmodel, ci.nonlinmodel, x̂[1:ci.linmodel.nx], u))
+    end
     return u
 end
 
@@ -225,17 +236,20 @@ function pop_append!(A::Matrix, vars::Vector)
     nothing
 end
 
-function plot_continuously(ci::ControlInterface)
+function plot_process(ci::ControlInterface)
     while ci.plotting
         display(controlplot(ci))
     end
 end
-function live_plot(ci::ControlInterface)
+function start_processes(ci::ControlInterface)
     ci.plotting = true
-    plot_thread = Threads.@spawn plot_continuously(ci)
+    plot_thread = Threads.@spawn plot_process(ci)
+    lin_thread = Threads.@spawn linearize_process(ci)
+    bind(ci.stepped_channel, lin_thread)
+    bind(ci.linearized_channel, lin_thread)
     return plot_thread
 end
-function stop_plot(ci::ControlInterface) ci.plotting = false end
+function stop_processes(ci::ControlInterface) ci.plotting = false end
 
 function controlplot(ci::ControlInterface)
     res = SimResult(ci.mpc, ci.U_data, ci.Y_data; ci.Ry_data, ci.X̂_data, ci.X_data)
@@ -243,8 +257,17 @@ function controlplot(ci::ControlInterface)
 end
 
 
-function live_linearize(ci::ControlInterface)
-    # TODO: threads spawn linearize on new x
+function linearize_process(ci::ControlInterface)
+    while ci.plotting
+        (mpc, linmodel, nonlinmodel, x, u) = take!(ci.stepped_channel)
+        ModelPredictiveControl.linearize!(linmodel, nonlinmodel; x, u)
+        # @show norm(linmodel.fop .- linmodel.xop)
+        # @show norm((linmodel.A * linmodel.xop + linmodel.Bu * linmodel.uop) .- linmodel.xop)
+        setmodel!(mpc, linmodel)
+        if !isready(ci.linearized_channel)
+            put!(ci.linearized_channel, deepcopy(mpc))
+        end
+    end
 end
 
 # function init!(ci::ControlInterface)

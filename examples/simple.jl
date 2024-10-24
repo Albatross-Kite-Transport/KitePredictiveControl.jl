@@ -31,22 +31,23 @@ end
 
 total_time = 30
 try
-    live_plot(ci)
+    start_processes(ci)
     for i in 1:Int(div(total_time, Ts))
         start_t = time()
         t = i*Ts-Ts
         println("t = ", t)
-        # ci.wanted_outputs[KitePredictiveControl.idx(ci.linmodel.yname, ci.sys.heading_y)] = wanted_heading_y(t)
+        ci.wanted_outputs[KitePredictiveControl.idx(ci.linmodel.yname, ci.kite.prob.f.sys.heading_y)] = wanted_heading_y(t)
         y = zeros(ci.nonlinmodel.ny)
         ci.nonlinmodel.h!(y, kite_real.integrator.u, nothing, nothing)
         set_values = KitePredictiveControl.step!(ci, y)
         real = @elapsed next_step!(kite_real; set_values, dt = Ts)
         # plot2d(kite_real.pos, (i-1)*Ts; zoom=false, front=false, xlim=(-35, 35), ylim=(0, 70))
+        @show ci.linmodel.A[1]
         pause_t = Ts - (time() - start_t)
-        if (pause_t + real < 0) println("pause_t = ", pause_t) end
-        # elseif (pause_t > 0) sleep(pause_t) end
+        if (pause_t + real < 0) println("pause_t = ", pause_t)
+        elseif (pause_t > 0) sleep(pause_t) end
     end
 finally
     sleep(2)
-    stop_plot(ci)
+    stop_processes(ci)
 end
