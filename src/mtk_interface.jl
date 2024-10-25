@@ -4,14 +4,13 @@
 #     return (f_ip, dvs, psym, io_sys)
 # end
 
-function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
+function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     get_y = getu(kite.integrator, outputs)
     nu = length(inputs)
     nx = length(kite.integrator.u)
     ny = length(outputs)
 
     sys = kite.prob.f.sys
-    solver = OrdinaryDiffEqBDF.QBDF()
 
     function make_default_creator(sys)
         keys = collect(unknowns(sys))
@@ -33,14 +32,14 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
     )
 
     "Nonlinear discrete dynamics"
-    function next_step!(x_plus, x, u, integ_setu_pair)
+    function next_step!(x_plus, x, u, integ_setu_pair) # TODO: simplify model here. state = tether length acc vel - kite pos acc vel * 3
         (integ, setu!) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0+Ts)
         setu!(integ, u)
         OrdinaryDiffEqCore.step!(integ, Ts, true)
         @assert successful_retcode(integ.sol)
         x_plus .= integ.u
-        return nothing
+        return x_plus
     end
     f!(x_plus, x, u, _, _) = next_step!(x_plus, x, u, integ_cache[vcat(x, u)])
 
@@ -49,11 +48,11 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, Ts)
         (integ, _) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0+Ts)
         y .= get_y(integ)
-        return nothing
+        return y
     end
     h!(y, x, _, _) = get_y!(y, x, integ_cache[vcat(x, zeros(3))])
 
-    return f!, h!, nu, nx, ny
+    return (f!, h!, nu, nx, ny)
 end
 
 function ModelingToolkit.variable_index(name::Vector{String}, var)

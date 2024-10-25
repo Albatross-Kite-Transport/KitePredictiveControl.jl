@@ -12,7 +12,12 @@ init_sim!(kite_model; prn=true, torque_control=true, init_set_values)
 next_step!(kite_real; set_values = init_set_values, dt = 1.0)
 next_step!(kite_model; set_values = init_set_values, dt = 1.0)
 
-ci = ControlInterface(kite_model; Ts, u0=init_set_values)
+# if !@isdefined(ci)
+    ci = ControlInterface(kite_model; Ts, u0=init_set_values)
+# else
+#     reset!(ci; u0=init_set_values)
+# end
+
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
 
 function wanted_heading_y(t)
@@ -20,34 +25,34 @@ function wanted_heading_y(t)
     if t < 10.0
         wanted_heading_y = 0.0
     elseif t < 100.0
-        wanted_heading_y = deg2rad(5)
+        wanted_heading_y = deg2rad(1)
     elseif t < 200.0
-        wanted_heading_y = -deg2rad(5)
+        wanted_heading_y = -deg2rad(-1)
     else
         wanted_heading_y = deg2rad(5)
     end
     return wanted_heading_y
 end
 
-total_time = 30
+total_time = 20
 try
-    start_processes(ci)
+    start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))
         start_t = time()
         t = i*Ts-Ts
         println("t = ", t)
-        ci.wanted_outputs[KitePredictiveControl.idx(ci.linmodel.yname, ci.kite.prob.f.sys.heading_y)] = wanted_heading_y(t)
+        ci.ry[KitePredictiveControl.idx(ci.linmodel.yname, ci.kite.prob.f.sys.heading_y)] = wanted_heading_y(t)
         y = zeros(ci.nonlinmodel.ny)
         ci.nonlinmodel.h!(y, kite_real.integrator.u, nothing, nothing)
         set_values = KitePredictiveControl.step!(ci, y)
         real = @elapsed next_step!(kite_real; set_values, dt = Ts)
         # plot2d(kite_real.pos, (i-1)*Ts; zoom=false, front=false, xlim=(-35, 35), ylim=(0, 70))
-        @show ci.linmodel.A[1]
         pause_t = Ts - (time() - start_t)
+        println("Run percentage: ", (time() - start_t)/Ts*100)
         if (pause_t + real < 0) println("pause_t = ", pause_t)
         elseif (pause_t > 0) sleep(pause_t) end
     end
 finally
     sleep(2)
-    stop_processes(ci)
+    stop_processes!(ci)
 end
