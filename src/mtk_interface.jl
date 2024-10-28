@@ -39,28 +39,28 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     """
     Nonlinear discrete dynamics. Takes in complex state and returns simple state_plus
     """
-    function next_step!(x_simple_plus, x, u, integ_setu_pair)
+    function next_step!(x_simple_plus, x, u, dt, integ_setu_pair)
         (integ, setu!, get_simple_x) = integ_setu_pair
-        reinit!(integ, x; t0=1.0, tf=1.0+Ts)
+        reinit!(integ, x; t0=1.0, tf=1.0+dt)
         setu!(integ, u)
-        OrdinaryDiffEqCore.step!(integ, Ts, true)
+        OrdinaryDiffEqCore.step!(integ, dt, true)
         @assert successful_retcode(integ.sol)
         x_simple_plus[1:nx_simple-1] .= get_simple_x(integ)
         x_simple_plus[end] = 1
         return x_simple_plus
     end
-    function f!(x_simple_plus, x, u)
-        next_step!(x_simple_plus, x, u, integ_cache[vcat(x, u)])
+    function f!(x_simple_plus, x, u, dt)
+        next_step!(x_simple_plus, x, u, dt, integ_cache[vcat(x, u)])
     end 
 
     "Observer function"
     function get_y!(y, x, integ_setu_pair)
-        (integ, _) = integ_setu_pair
+        (integ, _, _) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0+Ts)
         y .= get_y(integ)
         return y
     end
-    h!(y, x, _, _) = get_y!(y, x, integ_cache[vcat(x, zeros(3))])
+    h!(y, x) = get_y!(y, x, integ_cache[vcat(x, zeros(3))])
 
     return (f!, h!, simple_state, nu, nx, nx_simple, ny)
 end

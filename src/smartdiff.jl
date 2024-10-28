@@ -93,19 +93,38 @@ function generate_AB(sys)
 end
 
 
-# --- measure ---
-function linearize(AB, AB_pattern; time_multiplier = 10.0)
-    x_simple_plus = ones(nsx)
-    X = zeros(size(U, 1), nsx)
-    X_prime = zeros(size(U, 1), nsx)
+function linearize(model::SimModel{NT}; kwargs...) where NT<:Real
+    nu, nx, ny, nd = model.nu, model.nx, model.ny, model.nd
+    A  = Matrix{NT}(undef, nx, nx)
+    Bu = Matrix{NT}(undef, nx, nu) 
+    C  = Matrix{NT}(undef, ny, nx)
+    Bd = Matrix{NT}(undef, nx, nd)
+    Dd = Matrix{NT}(undef, ny, nd)
+    linmodel = LinModel{NT}(A, Bu, C, Bd, Dd, model.Ts)
+    linmodel.uname .= model.uname
+    linmodel.xname .= model.xname
+    linmodel.yname .= model.yname
+    linmodel.dname .= model.dname
+    return linearize!(linmodel, model; kwargs...)
+end
+
+"""
+Linearize using the known sparsity pattern (no sparse matrix as this allocates more).
+Measurements in discrete-time are used to calculate coefficients for the continuous-time approximation.
+The continuous time approximation is then discretized using zero order hold.
+"""
+function linearize!(linmodel::LinModel, AB::Matrix, AB_pattern::Matrix; u0=[-0.1, -0.1, -70.0], time_multiplier = 10.0)
+    x_simple_plus = linmodel.buffer.x
     steering_u = [-0.2, 0.2]
     middle_u = [-5.0, 5.0]
     nm = length(middle_u) * nu # number of measurements
     U = zeros(nm, nu)
+    X = zeros(nm, nsx)
+    X_prime = zeros(nm, nsx)
     for i in 1:nu
         for j in eachindex(middle_u)
             U[i, :] .= u0 - [i==1 ? steering_u[j] : 0.0, i==2 ? steering_u[j] : 0.0, i==3 ? middle_u[j] : 0.0]
-            f!(x_simple_plus, x0, U[i, :])
+            f!(x_simple_plus, x0, U[i, :], Ts*time_multiplier)
             X[i, 1:nsx] .= x_simple_0
             X[i, end] = 1
             X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts ./ time_multiplier
@@ -115,17 +134,26 @@ function linearize(AB, AB_pattern; time_multiplier = 10.0)
 
     # --- solve ---
     for i in 1:nsx
-        if !isempty(findnz(B[i, :])[1])
-            nz_indices = findall(!iszero, AB_pattern[i, :])
-            Z = XU[:, nz_indices]
-            AB[i, nz_indices] .= Z \ X_prime[:, i]
+        nz_idxs = findall(!iszero, AB_pattern[i, :])
+        if !isempty(nz_idxs)
+            Z = XU[:, nz_idxs]
+            AB[i, nz_idxs] .= Z \ X_prime[:, i]
         end
     end
     C = I(nsx)
     D = spzeros(nsx, nu)
     css = ss(AB[:, 1:nsx], AB[:, nsx+1:end], C, D)
     dss = c2d(css, Ts)
-    return dss.A, dss.B, dss.C, dss.D
+    linmodel.A .= dss.A
+    linmodel.Bu .= dss.B
+    linmodel.C .= dss.C
+
+    linmodel.uop .= u0
+    linmodel.yop .= h!(linmodel.buffer.y, x0)
+    linmodel.xop .= x0
+    linmodel.fop .= f!(x_simple_plus, x0, u0, Ts)
+    linmodel.x0 .= 0
+    return linmodel
 end
 
 function test_diff()
@@ -134,7 +162,6 @@ function test_diff()
     lin_heading = []
     for i in 1:20
         reps = 40
-        # x_simple_plus = copy(x_simple_0)
         u_test = u0 - [0, i, 0]
         init_sim!(kite; prn=false, torque_control=true, init_set_values)
         next_step!(kite; set_values=u_test, dt=Ts)

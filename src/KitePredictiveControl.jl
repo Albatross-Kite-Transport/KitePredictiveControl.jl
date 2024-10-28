@@ -127,7 +127,7 @@ function reset!(ci::ControlInterface;
 end
 function reset!(sys, nonlinmodel, x0, u0, ny, Ts, ry, noise, buffer_time)
     # --- linearize model ---
-    linmodel = ModelPredictiveControl.linearize(nonlinmodel; x=x0, u=u0)
+    linmodel = linearize(nonlinmodel; x=x0, u=u0)
 
     # --- initialize outputs and plotting indexes ---
     if isnothing(ry)
@@ -221,15 +221,6 @@ function step!(ci::ControlInterface, y; ry=ci.ry)
     pop_append!(ci.Ry_data, ry)
     pop_append!(ci.X̂_data, x̂)
     updatestate!(ci.mpc, u, y)
-    if isready(ci.linearized_channel)
-        println("getting")
-        println("error: ", ci.error)
-        ci.mpc = take!(ci.linearized_channel)
-    end
-    if !isready(ci.stepped_channel)
-        println("putting ")
-        put!(ci.stepped_channel, (deepcopy(ci.mpc), deepcopy(ci.linmodel), copy(x̂[1:ci.linmodel.nx]), copy(u))) # todo: make non-allocating copy mpc to mpc2 function
-    end
     @assert ci.plotting = true
     return u
 end
@@ -249,10 +240,7 @@ end
 function start_processes!(ci::ControlInterface)
     ci.plotting = true
     plot_thread = Threads.@spawn plot_process(ci)
-    lin_thread = Threads.@spawn linearize_process(ci)
-    bind(ci.stepped_channel, lin_thread)
-    bind(ci.linearized_channel, lin_thread)
-    return plot_thread, lin_thread
+    return plot_thread
 end
 function stop_processes!(ci::ControlInterface) ci.plotting = false end
 
@@ -263,17 +251,14 @@ end
 
 
 function linearize_process(ci::ControlInterface)
-    while ci.plotting
-        (mpc, linmodel, x, u) = take!(ci.stepped_channel)
-        ModelPredictiveControl.linearize!(linmodel, ci.nonlinmodel; x, u)
-        setmodel!(mpc, linmodel)
-        xnext = zeros(length(x))
-        ModelPredictiveControl.f!(xnext, linmodel, x, u, nothing, nothing)
-        ci.error = (norm(xnext .- x) - norm(linmodel.fop .- x)) / norm(linmodel.fop .- x)
-        # @show norm(linmodel.fop .- linmodel.xop)
-        # @show norm((linmodel.A * linmodel.xop + linmodel.Bu * linmodel.uop) .- linmodel.xop)
-        put!(ci.linearized_channel, deepcopy(mpc))
-    end
+    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x, u)
+    linearize!(ci.linmodel)
+    setmodel!(mpc, linmodel)
+    xnext = zeros(length(x))
+    ModelPredictiveControl.f!(xnext, linmodel, x, u, nothing, nothing)
+    ci.error = (norm(xnext .- x) - norm(linmodel.fop .- x)) / norm(linmodel.fop .- x)
+    # @show norm(linmodel.fop .- linmodel.xop)
+    # @show norm((linmodel.A * linmodel.xop + linmodel.Bu * linmodel.uop) .- linmodel.xop)
 end
 # @setup_workload begin
 #     @compile_workload begin
