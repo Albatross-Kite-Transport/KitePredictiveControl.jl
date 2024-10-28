@@ -5,11 +5,12 @@ using ForwardDiff: Dual, JacobianConfig
 using SymbolicIndexingInterface: parameter_values, state_values, setp, setu, getu
 using SciMLStructures
 import ModelingToolkit.SciMLBase: successful_retcode
-using DifferentiationInterface
-import ForwardDiff, PolyesterForwardDiff, FiniteDiff, FiniteDifferences, FastDifferentiation, Symbolics, Tracker
+using SparseDiffTools
+using SparseArrays
+using LinearAlgebra
 
 include("../src/mtk_interface.jl")
-Ts = 0.05
+Ts = 0.1
 if !@isdefined kite
     kite = KPS4_3L(KCU(se("system_3l.yaml")))
 end
@@ -30,68 +31,71 @@ outputs = vcat(
 )
 
 solver = OrdinaryDiffEq.QNDF()
-(f!, h!, nu, nx, ny) = generate_f_h(kite, inputs, outputs, solver, Ts)
+(f!, h!, idxs, nu, nx, nx_simple, ny) = generate_f_h(kite, inputs, outputs, solver, Ts)
+state = unknowns(sys)[idxs]
 
 x0 = copy(kite.integrator.u)
+simple_x0 = x0[idxs]
 u0 = copy(init_set_values)
 
-xnext0 = zeros(nx)
-f!(xnext0, x0, u0, 1.0, 1.0)
+xnext0 = zeros(nx_simple)
+f!(xnext0, x0, simple_x0, u0)
 
-A = zeros(nx, nx)
-B = zeros(nx, nu)
-myf_x0!(xnext0, x0) = f!(xnext0, x0, u0, 1.0, 1.0)
-myf_x0(x0) = f!(xnext0, x0, u0, 1.0, 1.0)
-myf_u0!(xnext0, u0) = f!(xnext0, x0, u0, 1.0, 1.0)
-myf_u0(u0) = f!(xnext0, x0, u0, 1.0, 1.0)
+A = zeros(nx_simple, nx_simple)
+B = zeros(nx_simple, nu)
+myf_x0!(xnext0, simple_x0) = f!(xnext0, x0, simple_x0, u0)
+myf_u0!(xnext0, u0) = f!(xnext0, x0, simple_x0, u0)
 
-f_prob!(xnext0, x0, u0, t) = f!(xnext0, x0, u0, 1.0, 1.0)
+function idx(symbol)
+    return ModelingToolkit.variable_index(string.(state), symbol)
+end
 
-# TODO: acc is pos-dependent, add acc to state variables.
-
+"""
+pos' = vel
+vel' = acc
+acc' = k_1 + k_2 * set_value
+k_1' = 0
+"""
 function jac(backend)
-    global A, B
-    x0 = copy(kite.integrator.u)
-    prep = prepare_jacobian(myf_x0!, xnext0, backend, x0)
-    jacobian!(myf_x0!, xnext0, A, prep, backend, x0)
-    @time jacobian!(myf_x0!, xnext0, A, prep, backend, x0)
-    jacobian!(myf_u0!, xnext0, B, backend, u0)
-    t = @elapsed jacobian!(myf_x0!, xnext0, A, prep, backend, x0)
+    jac_prototype = ones(nx_simple, nx_simple)
+    # [jac_prototype[idx(sys.tether_length[i]), idx(sys.tether_vel[i])] = 1.0 for i in 1:3]
+    # [jac_prototype[idx(sys.tether_length[i]), idx(sys.tether_length[i])] = 1.0 for i in 1:3]
+    sd = JacPrototypeSparsityDetection(; jac_prototype=sparse(jac_prototype))
+    adtype = AutoSparse(AutoForwardDiff())
 
-    f!(xnext0, x0, u0, 1.0, 1.0)
-    lin_xnext0 = A * x0 + B * u0
-    diff_ulin = norm(xnext0 .- x0)
-    diff_lin = norm(lin_xnext0 .- x0)
+    cache_A = sparse_jacobian_cache(adtype, sd, myf_x0!, xnext0, simple_x0)
+    A = sparse_jacobian(adtype, cache_A, myf_x0!, xnext0, simple_x0)
+    t = @elapsed sparse_jacobian!(A, adtype, cache_A, myf_x0!, xnext0, simple_x0)
+
+
+    jac_prototype = ones(nx_simple, nu)
+    # jac_prototype[vel_idxs, :] .= 1.0
+    sd = JacPrototypeSparsityDetection(; jac_prototype=sparse(jac_prototype))
+    adtype = AutoSparse(AutoForwardDiff())
+
+    cache_B = sparse_jacobian_cache(adtype, sd, myf_u0!, xnext0, u0)
+    B = sparse_jacobian(adtype, cache_B, myf_u0!, xnext0, u0)
+
+    # x0 = copy(kite.integrator.u)
+    # prep = prepare_jacobian(myf_x0!, xnext0, backend, simple_x0)
+    # jacobian!(myf_x0!, xnext0, A, prep, backend, simple_x0)
+    # @time jacobian!(myf_x0!, xnext0, A, prep, backend, simple_x0)
+    # jacobian!(myf_u0!, xnext0, B, backend, u0)
+    # t = @elapsed jacobian!(myf_x0!, xnext0, A, prep, backend, simple_x0)
+
+    f!(xnext0, x0, simple_x0, u0)
+    lin_xnext0 = A * simple_x0 + B * u0
+    for (i, unk) in enumerate(unknowns(sys)[idxs])
+        println(unk, "\t", simple_x0[i], "\t", xnext0[i], "\t", lin_xnext0[i])
+    end
+    diff_ulin = norm(xnext0 .- simple_x0)
+    diff_lin = norm(lin_xnext0 .- simple_x0)
+    # @show lin_xnext0 .- simple_x0
     println("solver: ", backend, "\n\tdiff_ulin: ", diff_ulin, "\n\tdiff_lin: ", diff_lin, "\n\ttime ", t)
-    nothing
+    return A, B
 end
 
-jac(AutoForwardDiff()) # works, big diff
+A, B = jac(backend) # works, big diff
+
 # jac(AutoPolyesterForwardDiff()) # ERROR: LoadError: Cannot determine ordering of Dual tags ForwardDiff.Tag{DiffEqBase.OrdinaryDiffEqTag, Dual{Nothing, Float64, 11}} and Nothing
-jac(AutoFiniteDiff()) # very fast
-
-# FiniteDifferenceMethod(
-#     grid::AbstractVector{Int},
-#     q::Int;
-#     condition::Real=DEFAULT_CONDITION,
-#     factor::Real=DEFAULT_FACTOR,
-#     max_range::Real=Inf
-# )
-
-function difference(points, order, adapt, factor, condition)
-    # fdm = FiniteDifferences.FiniteDifferenceMethod([0, 1], 1);
-    method = FiniteDifferences.forward_fdm(points, order; adapt, factor, condition);
-    A, = FiniteDifferences.jacobian(method, myf_x0, x0);
-    t = @elapsed A, = FiniteDifferences.jacobian(method, myf_x0, x0);
-    B, = FiniteDifferences.jacobian(method, myf_u0, u0);
-    f!(xnext0, x0, u0, 1.0, 1.0);
-    lin_xnext0 = A * x0 + B * u0;
-    diff_ulin = norm(xnext0 .- x0);
-    diff_lin = norm(lin_xnext0 .- x0);
-    println("solver: ", "FiniteDifferences", "\n\tdiff_ulin: ", diff_ulin, "\n\tdiff_lin: ", diff_lin, "\n\ttime ", t);
-end
-
-difference(2, 1, 2, 2, 10)
-
-# jac(AutoFastDifferentiation()) ERROR: TypeError: non-boolean (FastDifferentiation.Node) used in boolean context
-# jac(AutoSymbolics()) # slow
+# jac(AutoFiniteDiff()) # very fast

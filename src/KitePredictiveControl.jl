@@ -84,9 +84,9 @@ function ControlInterface(
     )
 
     # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, nu, nx, ny = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
+    f!, h!, states, nu, nx, ny = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
     nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
-    setname!(nonlinmodel, x=string.(unknowns(sys)), u=string.(inputs), y=string.(outputs))
+    setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
 
     linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, ry = 
         reset!(sys, nonlinmodel, x0, u0, ny, Ts, ry, noise, buffer_time)
@@ -284,7 +284,5 @@ end
 #         nothing
 #     end
 # end
-
-    
 
 end
