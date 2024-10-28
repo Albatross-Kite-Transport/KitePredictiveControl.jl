@@ -56,7 +56,7 @@ get_y = getu(kite.integrator, outputs)
 x_simple_0 = vcat(get_y(kite.integrator), 1)
 
 solver = OrdinaryDiffEq.QNDF()
-(f!, h!, simple_state, nu, _, nsx, ny) = generate_f_h(kite, inputs, outputs, solver, Ts)
+(f!, h!, simple_state, nu, _, nsx, ny) = generate_f_h(kite, inputs, outputs, solver, Ts*10)
 
 function idx(symbol)
     return ModelingToolkit.variable_index(string.(simple_state), symbol)
@@ -90,6 +90,7 @@ B_pattern = sparse(B_pattern)
 x_simple_plus = ones(nsx)
 f!(x_simple_plus, x0, u0)
 
+# --- measure ---
 nm = 8 # number of measurements
 U = zeros(nm, nu)
 X = zeros(size(U, 1), nsx)
@@ -103,16 +104,16 @@ for i in 1:nm
     f!(x_simple_plus, x0, U[i, :])
     X[i, 1:nsx] .= x_simple_0
     X[i, end] = 1
-    X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts
+    X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts ./ 10.0
 end
 
 XU = [X U]
 AB_pattern = [A_pattern B_pattern]
 AB = copy(AB_pattern)
 
-# Solve for each row of [A B]
+# --- solve ---
 for i in 1:nsx
-    if !isempty(findnz(B[i, :])[1])
+    if !isempty(findnz(B_pattern[i, :])[1])
         nz_indices = findnz(AB_pattern[i, :])[1]
         Z = XU[:, nz_indices]
         sol = Z \ X_prime[:, i]
@@ -120,7 +121,6 @@ for i in 1:nsx
     end
 end
 
-# Extract A and B from AB
 A = AB[:, 1:nsx]
 B = AB[:, nsx+1:end]
 C = I(nsx)
@@ -132,24 +132,22 @@ dss = c2d(css, Ts)
 u_test = u0 - [10.0, 0.0, 0.0]
 ulin_heading = []
 lin_heading = []
-for i in 1:20
-    # x_simple_plus = copy(x_simple_0)
-    u_test = u0 - [i, -i, 0.0]
-    f!(x_simple_plus, x0, u_test)
-    lin_plus = dss.A * x_simple_0 + dss.B * u_test
+init_sim!(kite; prn=true, torque_control=true, init_set_values)
+lin_plus = dss.A * x_simple_0 + dss.B * u_test
+u_test = u0 - [10, 0.0, 0.0]
+for j in 1:10
+    global lin_plus, x_simple_plus
+    next_step!(kite; set_values=u_test, dt=Ts)
+    x_simple_plus = get_y(kite.integrator)
     append!(ulin_heading, x_simple_plus[1])
     append!(lin_heading, lin_plus[1])
+    lin_plus = dss.A * lin_plus + dss.B * u_test
 end
 using Plots
 plot()
 plot!(ulin_heading)
 display(plot!(lin_heading))
 
-lin_plus = dss.A * x_simple_0 + dss.B * u_test
-diff_ulin = norm(x_simple_plus .- x_simple_0)
-diff_lin = norm(lin_plus .- x_simple_0)
-
-println("diff_ulin: ", diff_ulin, "\ndiff_lin: ", diff_lin)
 
 
 # # Update only the non-zero elements of A and B
