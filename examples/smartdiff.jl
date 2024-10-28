@@ -25,9 +25,9 @@ using SymbolicIndexingInterface: getu, setp
 using PreallocationTools
 using SparseDiffTools
 using SparseArrays
-using LinearAlgebra, IterTools
+using LinearAlgebra
 using KiteModels
-using IterativeSolvers, LinearOperators
+using IterativeSolvers
 
 include("../src/mtk_interface.jl")
 
@@ -37,7 +37,7 @@ if !@isdefined kite
 end
 
 init_set_values = [-0.1, -0.1, -70.0]
-init_sim!(kite; prn=true, torque_control=true, init_set_values, ϵ=100.0)
+init_sim!(kite; prn=true, torque_control=true, init_set_values)
 next_step!(kite; set_values = init_set_values, dt = 1.0)
 x0 = copy(kite.integrator.u)
 u0 = init_set_values
@@ -89,38 +89,35 @@ B_pattern = sparse(B_pattern)
 
 x_simple_plus = ones(nsx)
 f!(x_simple_plus, x0, u0)
-@show x_simple_plus
 
-nm = 4 # number of measurements
+nm = 8 # number of measurements
 U = zeros(nm, nu)
-U[1, :] .= u0
-U[2, :] .= u0 - [10.0, 0.0, 0.0]
-U[3, :] .= u0 - [0.0, 10.0, 0.0]
-U[4, :] .= u0 - [0.0, 0.0, 10.0]
 X = zeros(size(U, 1), nsx)
 X_prime = zeros(size(U, 1), nsx)
+set_value = 0.0
 for i in 1:nm
+    global set_value
+    if (i%4 == 1) set_value += 5.0 end
+    U[i, :] .= u0 - [i%4==1 ? set_value : 0.0, i%4==2 ? set_value : 0.0, i%4==3 ? set_value : 0.0]
+    @show U[i, :]
     f!(x_simple_plus, x0, U[i, :])
     X[i, 1:nsx] .= x_simple_0
     X[i, end] = 1
     X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts
 end
 
-m, n = size(X)  # m = 4, n = 12
-
-# Combine X and U
 XU = [X U]
-
-# Get the combined sparsity pattern
 AB_pattern = [A_pattern B_pattern]
-AB = spzeros(nsx, nsx + nu)
+AB = copy(AB_pattern)
 
 # Solve for each row of [A B]
-@time for i in 1:nsx
-    nz_indices = findnz(AB_pattern[i, :])[1]
-    Z = XU[:, nz_indices]
-    sol = Z \ X_prime[:, i]
-    AB[i, nz_indices] = sol
+for i in 1:nsx
+    if !isempty(findnz(B[i, :])[1])
+        nz_indices = findnz(AB_pattern[i, :])[1]
+        Z = XU[:, nz_indices]
+        sol = Z \ X_prime[:, i]
+        AB[i, nz_indices] = sol
+    end
 end
 
 # Extract A and B from AB
@@ -133,7 +130,21 @@ css = ss(A, B, C, D)
 dss = c2d(css, Ts)
 
 u_test = u0 - [10.0, 0.0, 0.0]
-f!(x_simple_plus, x0, u_test)
+ulin_heading = []
+lin_heading = []
+for i in 1:20
+    # x_simple_plus = copy(x_simple_0)
+    u_test = u0 - [i, -i, 0.0]
+    f!(x_simple_plus, x0, u_test)
+    lin_plus = dss.A * x_simple_0 + dss.B * u_test
+    append!(ulin_heading, x_simple_plus[1])
+    append!(lin_heading, lin_plus[1])
+end
+using Plots
+plot()
+plot!(ulin_heading)
+display(plot!(lin_heading))
+
 lin_plus = dss.A * x_simple_0 + dss.B * u_test
 diff_ulin = norm(x_simple_plus .- x_simple_0)
 diff_lin = norm(lin_plus .- x_simple_0)
