@@ -6,7 +6,7 @@
 
 function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     get_y = getu(kite.integrator, outputs)
-    
+
     # --- The outputs are heading, depower and tether length, and they can be calculated from this state ---
     sys = kite.prob.f.sys
     simple_state = outputs
@@ -31,7 +31,8 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     """
     function next_step!(x_simple_plus, x, u, dt, integ_setu_pair)
         (integ, setu!, get_simple_x) = integ_setu_pair
-        reinit!(integ, x; t0=1.0, tf=1.0+dt)
+        @show u
+        reinit!(integ, x; t0=1.0, tf=1.0 + dt)
         setu!(integ, u)
         OrdinaryDiffEq.step!(integ, dt, true)
         @assert successful_retcode(integ.sol)
@@ -41,21 +42,17 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     end
     function f!(x_simple_plus, x, u, dt)
         next_step!(x_simple_plus, x, u, dt, (integrator, setu!, get_simple_x))
-    end 
+    end
 
     "Observer function"
     function get_y!(y, x, integ_setu_pair)
         (integ, _, _) = integ_setu_pair
-        reinit!(integ, x; t0=1.0, tf=1.0+Ts)
+        reinit!(integ, x; t0=1.0, tf=1.0 + Ts)
         y[1:nx_simple-1] .= get_y(integ)
         y[end] = 1
         return y
     end
     h!(y, x) = get_y!(y, x, (integrator, setu!, get_simple_x))
 
-    return (f!, h!, simple_state, nu, nx, nx_simple, ny)
-end
-
-function variable_index(name::Vector{String}, var)
-    return findfirst(x -> x == string(var), name)
+    return (f!, h!, simple_state, nu, nx, nx_simple)
 end

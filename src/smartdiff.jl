@@ -24,9 +24,11 @@ c2d
 
 
 function generate_AB(sys, nsx, nu, xname)
-    function idx(symbol)
-        return variable_index(xname, symbol)
-    end
+    # function idx(symbol)
+    #     return idx(xname, symbol)
+    # end
+    idx = var -> findfirst(x -> x == string(var), xname)
+
     A_pattern = zeros(nsx, nsx)
     B_pattern = zeros(nsx, nu)
 
@@ -35,13 +37,10 @@ function generate_AB(sys, nsx, nu, xname)
     A_pattern[idx(sys.turn_rate_y), nsx] = 1.0
     B_pattern[idx(sys.turn_rate_y), [1, 2]] .= 1.0
 
-    # --- flap angle ---
-    for i in 1:2
-        A_pattern[idx(sys.flap_angle[i]), idx(sys.flap_vel[i])] = 1.0
-        A_pattern[idx(sys.flap_vel[i]), nsx] = 1.0
-        B_pattern[idx(sys.flap_vel[i]), i] = 1.0
-        B_pattern[idx(sys.flap_vel[i]), 3] = 1.0
-    end
+    # --- depower ---
+    A_pattern[idx(sys.depower), idx(sys.depower_vel)] = 1.0
+    A_pattern[idx(sys.depower_vel), nsx] = 1.0
+    B_pattern[idx(sys.depower_vel), 1:3] .= 1.0
 
     # --- tether length ---
     for i in 1:3
@@ -60,7 +59,6 @@ function linearize(sys, f!, h!, nsx, nu, xname, uname, x0, x_simple_0, u0, Ts; t
     A = zeros(nsx, nsx)
     Bu = zeros(nsx, nu)
     C = I(nsx)
-    @show size(C, 1)
     Bd = zeros(nsx, 0)
     Dd = zeros(nsx, 0)
 
@@ -71,7 +69,7 @@ function linearize(sys, f!, h!, nsx, nu, xname, uname, x0, x_simple_0, u0, Ts; t
     linmodel.yname .= linmodel.xname
 
     AB, AB_pattern = generate_AB(sys, nsx, nu, xname)
-    return linearize!(linmodel, f!, h!, AB, AB_pattern, x0, x_simple_0, u0, Ts; time_multiplier)
+    return linearize!(linmodel, f!, h!, AB, AB_pattern, x0, x_simple_0, u0, Ts; time_multiplier), AB, AB_pattern
 end
 
 """
@@ -80,7 +78,7 @@ Measurements in discrete-time are used to calculate coefficients for the continu
 The continuous time approximation is then discretized using zero order hold.
 """
 function linearize!(ci::ControlInterface, linmodel::LinModel, x0, u0)
-    return linearize!(linmodel, ci.f!, ci.h!, ci.AB, ci.AB_pattern, x0, u0, ci.Ts; ci.time_multiplier)
+    return linearize!(linmodel, ci.f!, ci.h!, ci.AB, ci.AB_pattern, x0, ci.x_simple_0, u0, ci.Ts; ci.time_multiplier)
 end
 function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, x0, x_simple_0, u0, Ts; time_multiplier=10.0)
     nu = linmodel.nu
@@ -98,7 +96,6 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
             U[i, :] .= u0 - [i == 1 ? steering_u[j] : 0.0, i == 2 ? steering_u[j] : 0.0, i == 3 ? middle_u[j] : 0.0]
             f!(x_simple_plus, x0, U[i, :], Ts * time_multiplier)
             X[i, :] .= x_simple_0
-            # X[i, end] = 1
             X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts ./ time_multiplier
         end
     end
@@ -123,7 +120,8 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
     linmodel.uop .= u0
     linmodel.yop .= h!(linmodel.buffer.y, x0)
     linmodel.xop .= x_simple_0
-    linmodel.fop .= f!(x_simple_plus, x0, u0, Ts)
+    # linmodel.fop .= f!(x_simple_plus, x0, u0, Ts)
+    linmodel.fop .= linmodel.A * x_simple_0 + linmodel.Bu * u0
     linmodel.x0 .= 0
     return linmodel
 end

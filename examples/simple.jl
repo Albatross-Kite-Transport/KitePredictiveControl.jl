@@ -41,10 +41,10 @@ try
         start_t = time()
         t = i*Ts-Ts
         println("t = ", t)
-        ci.ry[KitePredictiveControl.idx(ci.linmodel.yname, ci.kite.prob.f.sys.heading_y)] = wanted_heading_y(t)
-        y = zeros(ci.nonlinmodel.ny)
-        ci.nonlinmodel.h!(y, kite_real.integrator.u, nothing, nothing)
-        set_values = KitePredictiveControl.step!(ci, y)
+
+        y = zeros(ci.linmodel.ny)
+        ci.h!(y, kite_real.integrator.u)
+        set_values = KitePredictiveControl.step!(ci, kite_real.integrator.u, y; rheading=wanted_heading_y(t))
         real = @elapsed next_step!(kite_real; set_values, dt = Ts)
         # plot2d(kite_real.pos, (i-1)*Ts; zoom=false, front=false, xlim=(-35, 35), ylim=(0, 70))
         pause_t = Ts - (time() - start_t)

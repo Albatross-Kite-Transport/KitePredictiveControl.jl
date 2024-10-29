@@ -33,10 +33,16 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     Ts::Float64
     "nonlinear KiteModels.jl model"
     kite::KiteModels.KPS4_3L
+    "complex x0 to simple x_plus nonlinear function"
+    f!::Function
+    "observer function"
+    h!::Function
     "linearized model of the kite"
     linmodel::ModelPredictiveControl.LinModel
     mpc::ModelPredictiveControl.LinMPC
     optim::JuMP.Model
+    AB::Matrix{Float64}
+    AB_pattern::Matrix{Float64}
     U_data::Matrix{Float64}
     Y_data::Matrix{Float64}
     Ry_data::Matrix{Float64}
@@ -67,25 +73,26 @@ function ControlInterface(
     noise::Float64=1e-3,
     buffer_time::Int=20
 )
+    x0 = copy(x0)
     # --- get symbolic inputs and outputs ---
     sys = kite.prob.f.sys
     inputs = [sys.set_values[i] for i in 1:3]
     outputs = vcat(
         sys.heading_y,
         sys.turn_rate_y,
-        vcat(sys.flap_angle),
-        vcat(sys.flap_vel),
+        sys.depower,
+        sys.depower_vel,
         vcat(sys.tether_length),
         vcat(sys.tether_vel),
     )
 
     # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, simple_state, nu, nx, nsx, ny = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
+    f!, h!, simple_state, nu, nx, nsx = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
     # nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
     # setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
 
-    linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, ry =
-        reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry, noise, buffer_time, f!, h!)
+    linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, x_simple_0, ry, AB, AB_pattern =
+        reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
 
     ci = ControlInterface(
         inputs=inputs,
@@ -95,6 +102,8 @@ function ControlInterface(
         u0=u0,
         linmodel=linmodel,
         kite=kite,
+        (f!)=f!,
+        (h!)=h!,
         mpc=mpc,
         optim=optim,
         Ts=Ts,
@@ -106,6 +115,8 @@ function ControlInterface(
         output_idxs=output_idxs,
         observed_idxs=observed_idxs,
         y_noise=y_noise,
+        AB=AB,
+        AB_pattern=AB_pattern,
     )
     return ci
 end
@@ -124,44 +135,50 @@ function reset!(ci::ControlInterface;
         reset!(ci.kite.prob.f.sys, x0, u0, ci.linmodel.ny, ci.Ts, ry, noise, buffer_time)
     return nothing
 end
-function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry, noise, buffer_time, f!, h!)
+function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
+    # function yidx(name::Vector{String}, var)
+    #     return findfirst(x -> x == string(var), name)
+    # end
+    yidx = var -> findfirst(x -> x == string(var), linmodel.yname)
+    xidx = var -> findfirst(x -> x == string(var), linmodel.xname)
+
     # --- linearize model ---
     x_simple_0 = zeros(nsx)
-    linmodel = linearize(sys, f!, h!, nsx, nu,
+    linmodel, AB, AB_pattern = linearize(sys, f!, h!, nsx, nu,
         string.(simple_state), string.(inputs),
         x0, x_simple_0, u0, Ts; time_multiplier=10)
 
     # --- initialize outputs and plotting indexes ---
     if isnothing(ry)
-        y0 = zeros(ny)
+        y0 = zeros(nsx)
         h!(y0, x0)
         ry = y0
-        ry[idx(linmodel.yname, sys.heading_y)] = deg2rad(0.0)
-        ry[idx(linmodel.yname, sys.depower)] = 0.45
+        ry[yidx(sys.heading_y)] = deg2rad(0.0)
+        ry[yidx(sys.depower)] = 0.45
     end
     output_idxs = vcat(
-        idx(linmodel.yname, sys.heading_y),
-        idx(linmodel.yname, sys.depower),
-        # idx(linmodel.yname, sys.tether_length[1]),
-        # idx(linmodel.yname, sys.tether_length[2]),
-        idx(linmodel.yname, sys.tether_length[3]),
+        yidx(sys.heading_y),
+        yidx(sys.depower),
+        # yidx(sys.tether_length[1]),
+        # yidx(sys.tether_length[2]),
+        yidx(sys.tether_length[3]),
     )
     observed_idxs = vcat(
-        # idx(sys, sys.pos[2, kite.num_A]),
-        idx(sys, sys.tether_length[1]),
-        idx(sys, sys.tether_length[2]),
-        idx(sys, sys.tether_length[3]),
-        idx(sys, sys.flap_angle[1]),
-        idx(sys, sys.flap_angle[2]),
+        # xidx(sys.pos[2, kite.num_A]),
+        xidx(sys.tether_length[1]),
+        xidx(sys.tether_length[2]),
+        xidx(sys.tether_length[3]),
+        xidx(sys.depower),
+        xidx(sys.heading_y),
         # linmodel.nx + linmodel.ny
     )
 
     Mwt = fill(0.0, linmodel.ny)
-    Mwt[idx(linmodel.yname, sys.heading_y)] = 1.0 / deg2rad(5.0)
-    Mwt[idx(linmodel.yname, sys.depower)] = 1.0 / deg2rad(90)
-    # Mwt[idx(linmodel.yname, sys.tether_length[1])] = 0.1
-    # Mwt[idx(linmodel.yname, sys.tether_length[2])] = 0.1
-    Mwt[idx(linmodel.yname, sys.tether_length[3])] = 1.0 / 10.0
+    Mwt[yidx(sys.heading_y)] = 1.0 / deg2rad(5.0)
+    Mwt[yidx(sys.depower)] = 1.0 / deg2rad(90)
+    # Mwt[yidx(sys.tether_length[1])] = 0.1
+    # Mwt[yidx(sys.tether_length[2])] = 0.1
+    Mwt[yidx(sys.tether_length[3])] = 1.0 / 10.0
     Nwt = fill(0.0, linmodel.nu)
     Lwt = fill(0.1, linmodel.nu)
 
@@ -171,7 +188,7 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry,
     nint_u = fill(1, linmodel.nu)
     estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
-    Hp, Hc = 100, 2
+    Hp, Hc = 10, 2
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
@@ -180,12 +197,12 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry,
     # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
     ymin = fill(-Inf, linmodel.ny)
     ymax = fill(Inf, linmodel.ny)
-    # ymin[idx(linmodel.yname, sys.tether_length[1])] = 57.0
-    # ymin[idx(linmodel.yname, sys.tether_length[2])] = 57.0
-    # ymin[idx(linmodel.yname, sys.tether_length[3])] = x0[idx(sys, sys.tether_length[3])] - 1.0
-    # ymax[idx(linmodel.yname, sys.tether_length[1])] = x0[idx(sys, sys.tether_length[1])] + 0.3
-    # ymax[idx(linmodel.yname, sys.tether_length[2])] = x0[idx(sys, sys.tether_length[2])] + 0.3
-    # ymax[idx(linmodel.yname, sys.tether_length[3])] = x0[idx(sys, sys.tether_length[3])] + 1.0
+    # ymin[yidx(sys.tether_length[1])] = 57.0
+    # ymin[yidx(sys.tether_length[2])] = 57.0
+    # ymin[yidx(sys.tether_length[3])] = x0[xidx(sys.tether_length[3])] - 1.0
+    # ymax[yidx(sys.tether_length[1])] = x0[xidx(sys.tether_length[1])] + 0.3
+    # ymax[yidx(sys.tether_length[2])] = x0[xidx(sys.tether_length[2])] + 0.3
+    # ymax[yidx(sys.tether_length[3])] = x0[xidx(sys.tether_length[3])] + 1.0
     # ymin[end] = -1000
     # ymax[end] = 1000
     setconstraint!(mpc; umin, umax, ymin, ymax)
@@ -196,9 +213,9 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry,
     U_data = fill(NaN, linmodel.nu, N)
     Y_data = fill(NaN, linmodel.ny, N)
     Ry_data = fill(NaN, linmodel.ny, N)
-    X̂_data = fill(NaN, linmodel.nx + linmodel.ny, N)
+    X̂_data = fill(NaN, estim.nx̂, N)
     y_noise = fill(noise, linmodel.ny)
-    return linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, ry
+    return linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, x_simple_0, ry, AB, AB_pattern
 end
 
 
@@ -215,10 +232,14 @@ function lin_ulin_sim(ci::ControlInterface)
     # @assert false
 end
 
-function step!(ci::ControlInterface, y; ry=ci.ry)
+function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
+    if !isnothing(rheading)
+        ci.ry[1] = rheading
+        @show ci.linmodel.yname[1]
+    end
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
-    linearize!(ci, ci.linmodel, x̂[1:ci.linmodel.nx], u)
+    linearize!(ci, ci.linmodel, x, u)
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
