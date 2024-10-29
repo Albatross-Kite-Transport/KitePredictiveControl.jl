@@ -177,12 +177,12 @@ function reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts,
 
     Mwt = fill(0.0, linmodel.ny)
     Mwt[yidx(sys.heading_y)] = 10.0
-    Mwt[yidx(sys.depower)] = 0.0
+    Mwt[yidx(sys.depower)] = 1.0
     # Mwt[yidx(sys.tether_length[1])] = 0.1
     # Mwt[yidx(sys.tether_length[2])] = 0.1
-    Mwt[yidx(sys.tether_length[3])] = 0.001
+    Mwt[yidx(sys.tether_length[3])] = 0.1
     Nwt = fill(0.0, linmodel.nu)
-    Lwt = fill(0.005, linmodel.nu)
+    Lwt = fill(0.01, linmodel.nu)
 
     σR = fill(1e-4, linmodel.ny)
     σQ = fill(1e2, linmodel.nx)
@@ -190,7 +190,7 @@ function reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts,
     nint_u = fill(1, linmodel.nu)
     estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
-    Hp, Hc = 10, 2
+    Hp, Hc = 40, 1
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
@@ -234,7 +234,7 @@ function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
     linearize!(ci, ci.linmodel, x, u)
-    display(linearization_plot(ci, x, u))
+    # display(linearization_plot(ci, x, u))
     @show ci.linmodel.A[1, 2]
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
@@ -254,7 +254,7 @@ end
 
 function plot_process(ci::ControlInterface)
     while ci.plotting
-        # display(controlplot(ci))
+        display(controlplot(ci))
     end
 end
 function start_processes!(ci::ControlInterface)

@@ -1,10 +1,15 @@
 using Revise, KitePredictiveControl, KiteModels, ControlPlots
 
-Ts = 0.05
+Ts = 0.1
 if !@isdefined kite_real
     kite_real = KPS4_3L(KCU(se("system_3l.yaml")))
     kite_model = KPS4_3L(KCU(se("system_3l.yaml"))) # TODO: different sim vs real system
 end
+tol = 1e-3
+kite_real.set.abs_tol = tol
+kite_real.set.rel_tol = tol
+kite_model.set.abs_tol = tol
+kite_model.set.rel_tol = tol
 
 init_set_values = [-0.1, -0.1, -70.0]
 init_sim!(kite_real; prn=true, torque_control=true, init_set_values) # TODO: move to different core
