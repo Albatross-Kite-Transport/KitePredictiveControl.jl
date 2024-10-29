@@ -19,58 +19,21 @@ X_prime = A * X + B * U
 c2d
 """
 
-using ModelingToolkit, OrdinaryDiffEq, OrdinaryDiffEqCore, ControlSystems
-import ModelingToolkit.SciMLBase: successful_retcode
-using SymbolicIndexingInterface: getu, setp
-using PreallocationTools
-using SparseDiffTools
-using SparseArrays
-using LinearAlgebra
-using KiteModels
-using IterativeSolvers
+# time_multiplier = 10
+# (f!, h!, simple_state, nu, _, nsx, ny) = generate_f_h(kite, inputs, outputs, solver, Ts * time_multiplier)
 
-include("../src/mtk_interface.jl")
 
-Ts = 0.1
-if !@isdefined kite
-    kite = KPS4_3L(KCU(se("system_3l.yaml")))
-end
-
-init_set_values = [-0.1, -0.1, -70.0]
-init_sim!(kite; prn=true, torque_control=true, init_set_values)
-next_step!(kite; set_values = init_set_values, dt = 1.0)
-x0 = copy(kite.integrator.u)
-u0 = init_set_values
-umin, umax = [-20, -20, -500], [0.0, 0.0, 0.0]
-sys = kite.prob.f.sys
-inputs = [sys.set_values[i] for i in 1:3]
-outputs = vcat(
-        sys.heading_y, 
-        sys.turn_rate_y, 
-        vcat(sys.flap_angle),
-        vcat(sys.flap_vel),
-        vcat(sys.tether_length),
-        vcat(sys.tether_vel),
-    )
-get_y = getu(kite.integrator, outputs)
-x_simple_0 = vcat(get_y(kite.integrator), 1)
-
-solver = OrdinaryDiffEq.QNDF()
-time_multiplier = 10
-(f!, h!, simple_state, nu, _, nsx, ny) = generate_f_h(kite, inputs, outputs, solver, Ts*time_multiplier)
-
-function idx(symbol)
-    return ModelingToolkit.variable_index(string.(simple_state), symbol)
-end
-
-function generate_AB(sys)
+function generate_AB(sys, nsx, nu, xname)
+    function idx(symbol)
+        return variable_index(xname, symbol)
+    end
     A_pattern = zeros(nsx, nsx)
     B_pattern = zeros(nsx, nu)
 
     # --- heading ---
     A_pattern[idx(sys.heading_y), idx(sys.turn_rate_y)] = 1.0
     A_pattern[idx(sys.turn_rate_y), nsx] = 1.0
-    B_pattern[idx(sys.turn_rate_y), [1,2]] .= 1.0
+    B_pattern[idx(sys.turn_rate_y), [1, 2]] .= 1.0
 
     # --- flap angle ---
     for i in 1:2
@@ -93,19 +56,22 @@ function generate_AB(sys)
 end
 
 
-function linearize(model::SimModel{NT}; kwargs...) where NT<:Real
-    nu, nx, ny, nd = model.nu, model.nx, model.ny, model.nd
-    A  = Matrix{NT}(undef, nx, nx)
-    Bu = Matrix{NT}(undef, nx, nu) 
-    C  = Matrix{NT}(undef, ny, nx)
-    Bd = Matrix{NT}(undef, nx, nd)
-    Dd = Matrix{NT}(undef, ny, nd)
-    linmodel = LinModel{NT}(A, Bu, C, Bd, Dd, model.Ts)
-    linmodel.uname .= model.uname
-    linmodel.xname .= model.xname
-    linmodel.yname .= model.yname
-    linmodel.dname .= model.dname
-    return linearize!(linmodel, model; kwargs...)
+function linearize(sys, f!, h!, nsx, nu, xname, uname, x0, x_simple_0, u0, Ts; time_multiplier)
+    A = zeros(nsx, nsx)
+    Bu = zeros(nsx, nu)
+    C = I(nsx)
+    @show size(C, 1)
+    Bd = zeros(nsx, 0)
+    Dd = zeros(nsx, 0)
+
+    linmodel = LinModel{Float64}(A, Bu, C, Bd, Dd, Ts)
+    linmodel.uname .= uname
+    linmodel.xname[1:end-1] .= xname
+    linmodel.xname[end] = "one"
+    linmodel.yname .= linmodel.xname
+
+    AB, AB_pattern = generate_AB(sys, nsx, nu, xname)
+    return linearize!(linmodel, f!, h!, AB, AB_pattern, x0, x_simple_0, u0, Ts; time_multiplier)
 end
 
 """
@@ -113,8 +79,14 @@ Linearize using the known sparsity pattern (no sparse matrix as this allocates m
 Measurements in discrete-time are used to calculate coefficients for the continuous-time approximation.
 The continuous time approximation is then discretized using zero order hold.
 """
-function linearize!(linmodel::LinModel, AB::Matrix, AB_pattern::Matrix; u0=[-0.1, -0.1, -70.0], time_multiplier = 10.0)
+function linearize!(ci::ControlInterface, linmodel::LinModel, x0, u0)
+    return linearize!(linmodel, ci.f!, ci.h!, ci.AB, ci.AB_pattern, x0, u0, ci.Ts; ci.time_multiplier)
+end
+function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, x0, x_simple_0, u0, Ts; time_multiplier=10.0)
+    nu = linmodel.nu
+    nsx = linmodel.nx
     x_simple_plus = linmodel.buffer.x
+    h!(x_simple_0, x0)
     steering_u = [-0.2, 0.2]
     middle_u = [-5.0, 5.0]
     nm = length(middle_u) * nu # number of measurements
@@ -123,10 +95,10 @@ function linearize!(linmodel::LinModel, AB::Matrix, AB_pattern::Matrix; u0=[-0.1
     X_prime = zeros(nm, nsx)
     for i in 1:nu
         for j in eachindex(middle_u)
-            U[i, :] .= u0 - [i==1 ? steering_u[j] : 0.0, i==2 ? steering_u[j] : 0.0, i==3 ? middle_u[j] : 0.0]
-            f!(x_simple_plus, x0, U[i, :], Ts*time_multiplier)
-            X[i, 1:nsx] .= x_simple_0
-            X[i, end] = 1
+            U[i, :] .= u0 - [i == 1 ? steering_u[j] : 0.0, i == 2 ? steering_u[j] : 0.0, i == 3 ? middle_u[j] : 0.0]
+            f!(x_simple_plus, x0, U[i, :], Ts * time_multiplier)
+            X[i, :] .= x_simple_0
+            # X[i, end] = 1
             X_prime[i, 1:nsx] .= (x_simple_plus .- x_simple_0) ./ Ts ./ time_multiplier
         end
     end
@@ -141,7 +113,7 @@ function linearize!(linmodel::LinModel, AB::Matrix, AB_pattern::Matrix; u0=[-0.1
         end
     end
     C = I(nsx)
-    D = spzeros(nsx, nu)
+    D = zeros(nsx, nu)
     css = ss(AB[:, 1:nsx], AB[:, nsx+1:end], C, D)
     dss = c2d(css, Ts)
     linmodel.A .= dss.A
@@ -150,7 +122,7 @@ function linearize!(linmodel::LinModel, AB::Matrix, AB_pattern::Matrix; u0=[-0.1
 
     linmodel.uop .= u0
     linmodel.yop .= h!(linmodel.buffer.y, x0)
-    linmodel.xop .= x0
+    linmodel.xop .= x_simple_0
     linmodel.fop .= f!(x_simple_plus, x0, u0, Ts)
     linmodel.x0 .= 0
     return linmodel
@@ -178,7 +150,6 @@ function test_diff()
         append!(ulin_heading, x_simple_plus[1])
         append!(lin_heading, lin_plus[1])
     end
-    using Plots
     plot()
     plot!(ulin_heading)
     display(plot!(lin_heading))

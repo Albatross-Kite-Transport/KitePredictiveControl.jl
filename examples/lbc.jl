@@ -1,34 +1,62 @@
-using Random, DifferentialEquations, LinearAlgebra, Optimization, OptimizationNLopt,
-      OptimizationOptimJL, PreallocationTools
+"""
+NOT WORKING
 
-lbc = GeneralLazyBufferCache(function (p)
-    DifferentialEquations.init(ODEProblem(ode_fnc, y₀, (0.0, T), p), Tsit5(); saveat = t)
-end)
+GeneralLazyBufferCache as was implemented in mtk_interface.jl. Is needed when using forwarddiff.
+"""
 
-Random.seed!(2992999)
-λ, y₀, σ = -0.5, 15.0, 0.1
-T, n = 5.0, 200
-Δt = T / n
-t = [j * Δt for j in 0:n]
-y = y₀ * exp.(λ * t)
-yᵒ = y .+ [0.0, σ * randn(n)...]
-ode_fnc(u, p, t) = p * u
-function loglik(θ, data, integrator)
-    yᵒ, n, ε = data
-    λ, σ, u0 = θ
-    integrator.p = λ
-    reinit!(integrator, u0)
-    solve!(integrator)
-    ε = yᵒ .- integrator.sol.u
-    ℓ = -0.5n * log(2π * σ^2) - 0.5 / σ^2 * sum(ε .^ 2)
+get_y = getu(kite.integrator, outputs)
+    
+# --- The outputs are heading, depower and tether length, and they can be calculated from this state ---
+sys = kite.prob.f.sys
+simple_state = outputs
+state = unknowns(sys)
+nu = length(inputs)
+nx_simple = length(simple_state) + 1
+nx = length(state)
+ny = length(outputs)
+
+function make_default_creator(state)
+    keys = collect(state)
+    return x -> Dict(k => x[i] for (i, k) in enumerate(keys))
 end
-θ₀ = [-1.0, 0.5, 19.73]
-negloglik = (θ, p) -> -loglik(θ, p, lbc[θ[1]])
-fnc = OptimizationFunction(negloglik, Optimization.AutoForwardDiff())
-ε = zeros(n)
-prob = OptimizationProblem(fnc,
-    θ₀,
-    (yᵒ, n, ε),
-    lb = [-10.0, 1e-6, 0.5],
-    ub = [10.0, 10.0, 25.0])
-solve(prob, LBFGS())
+create_default = make_default_creator(state)
+
+integ_cache = GeneralLazyBufferCache(
+    function (xu)
+        x = xu[1:nx]
+        u = xu[nx+1:end]
+        default = create_default(x)
+        par = vcat([inputs[i] => u[i] for i in 1:nu])
+        prob = ODEProblem(sys, default, (0.0, Ts), par)
+        setu! = setp(prob, [inputs[i] for i in 1:nu])
+        get_simple_x = getu(prob, simple_state)
+        integrator = OrdinaryDiffEqCore.init(prob, solver; saveat=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol, verbose=false)
+        return (integrator, setu!, get_simple_x)
+    end
+)
+
+"""
+Nonlinear discrete dynamics. Takes in complex state and returns simple state_plus
+"""
+function next_step!(x_simple_plus, x, u, dt, integ_setu_pair)
+    (integ, setu!, get_simple_x) = integ_setu_pair
+    reinit!(integ, x; t0=1.0, tf=1.0+dt)
+    setu!(integ, u)
+    OrdinaryDiffEqCore.step!(integ, dt, true)
+    @assert successful_retcode(integ.sol)
+    x_simple_plus[1:nx_simple-1] .= get_simple_x(integ)
+    x_simple_plus[end] = 1
+    return x_simple_plus
+end
+function f!(x_simple_plus, x, u, dt)
+    next_step!(x_simple_plus, x, u, dt, integ_cache[vcat(x, u)])
+end 
+
+"Observer function"
+function get_y!(y, x, integ_setu_pair)
+    (integ, _, _) = integ_setu_pair
+    reinit!(integ, x; t0=1.0, tf=1.0+Ts)
+    y .= get_y(integ)
+    return y
+end
+h!(y, x) = get_y!(y, x, integ_cache[vcat(x, zeros(3))])

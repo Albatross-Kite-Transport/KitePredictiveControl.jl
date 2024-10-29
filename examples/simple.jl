@@ -13,7 +13,7 @@ next_step!(kite_real; set_values = init_set_values, dt = 1.0)
 next_step!(kite_model; set_values = init_set_values, dt = 1.0)
 
 # if !@isdefined(ci)
-    ci = ControlInterface(kite_model; Ts, u0=init_set_values)
+    ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=init_set_values)
 # else
 #     reset!(ci; u0=init_set_values)
 # end

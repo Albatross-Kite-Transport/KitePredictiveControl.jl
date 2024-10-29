@@ -1,42 +1,38 @@
 module KitePredictiveControl
 
 using ModelPredictiveControl
-using PrecompileTools: @setup_workload, @compile_workload 
-using ModelingToolkit
-using KiteModels, ControlSystems, Serialization, OrdinaryDiffEqCore, OrdinaryDiffEqBDF, 
-        RuntimeGeneratedFunctions, LinearAlgebra, SymbolicIndexingInterface, Plots, Base.Threads
-using JuMP, DAQP, MadNLP, HiGHS, SeeToDee, NonlinearSolve, ForwardDiff # solvers
-using ControlSystemIdentification, ControlSystemsBase, Parameters
+using PrecompileTools: @setup_workload, @compile_workload
+using KiteModels, ControlSystems, Serialization, OrdinaryDiffEq,
+    LinearAlgebra, Plots, Base.Threads
+using JuMP, HiGHS # solvers
+using Parameters
 using SymbolicIndexingInterface: parameter_values, state_values
-using SciMLStructures
-using ModelingToolkit: variable_index as idx
-import ModelingToolkit.SciMLBase: successful_retcode
-using PreallocationTools
-using Statistics
-# import RobustAndOptimalControl: named_ss
+using ModelingToolkit: variable_index as idx, unknowns
+using ModelingToolkit.SciMLBase: successful_retcode
+using SymbolicIndexingInterface: getu, setp
+import Symbolics: Num
 
-export step!, reset!, controlplot, start_processes!, stop_processes!
 export ControlInterface
-
+export step!, reset!, controlplot, start_processes!, stop_processes!
 
 set_data_path(joinpath(@__DIR__, "..", "data"))
 @with_kw mutable struct ControlInterface
     "symbolic inputs"
-    inputs::Vector{Symbolics.Num}
+    inputs::Vector{Num}
     "symbolic outputs"
-    outputs::Vector{Symbolics.Num}
+    outputs::Vector{Num}
     "initial inputs"
     u0::Vector{Float64}
     "initial state"
     x0::Vector{Float64}
+    "initial simple state"
+    x_simple_0::Vector{Float64}
     "wanted outputs"
     ry::Vector{Float64}
     "sampling time"
     Ts::Float64
-    "realistic KiteModels.jl model"
+    "nonlinear KiteModels.jl model"
     kite::KiteModels.KPS4_3L
-    "nonlinear model of the kite"
-    nonlinmodel::ModelPredictiveControl.NonLinModel
     "linearized model of the kite"
     linmodel::ModelPredictiveControl.LinModel
     mpc::ModelPredictiveControl.LinMPC
@@ -49,90 +45,96 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     observed_idxs::Vector{Int}
     y_noise::Vector{Float64}
     error::Float64 = 0.0
+    "how many time steps to look into the future when linearizing"
+    time_multiplier::Int = 10
     plotting::Bool = true
-    linearized_channel::Channel{ModelPredictiveControl.LinMPC} = Channel{ModelPredictiveControl.LinMPC}(1)
-    stepped_channel::Channel{Tuple{ModelPredictiveControl.LinMPC, 
-                                ModelPredictiveControl.LinModel, 
-                                Vector{Float64}, Vector{Float64}}} =
-                    Channel{Tuple{ModelPredictiveControl.LinMPC, 
-                                ModelPredictiveControl.LinModel, 
-                                Vector{Float64}, Vector{Float64}}}(1)
+    # linearized_channel::Channel{ModelPredictiveControl.LinMPC} = Channel{ModelPredictiveControl.LinMPC}(1)
+    # stepped_channel::Channel{Tuple{ModelPredictiveControl.LinMPC,
+    #     ModelPredictiveControl.LinModel,
+    #     Vector{Float64},Vector{Float64}}} =
+    #     Channel{Tuple{ModelPredictiveControl.LinMPC,
+    #         ModelPredictiveControl.LinModel,
+    #         Vector{Float64},Vector{Float64}}}(1)
 end
 
-include("mtk_interface.jl")
 
 function ControlInterface(
-        kite::KPS4_3L; 
-        Ts::Float64=0.05, 
-        x0::Vector{Float64}=kite.integrator.u,
-        u0::Vector{Float64}=zeros(3), 
-        ry::Union{Nothing, Vector{Float64}}=nothing, 
-        noise::Float64=1e-3, 
-        buffer_time::Int=20
-        )
+    kite::KPS4_3L;
+    Ts::Float64=0.05,
+    x0::Vector{Float64}=kite.integrator.u,
+    u0::Vector{Float64}=zeros(3),
+    ry::Union{Nothing,Vector{Float64}}=nothing,
+    noise::Float64=1e-3,
+    buffer_time::Int=20
+)
     # --- get symbolic inputs and outputs ---
     sys = kite.prob.f.sys
     inputs = [sys.set_values[i] for i in 1:3]
     outputs = vcat(
-        vcat(sys.flap_angle), 
-        reduce(vcat, collect(sys.pos[:, 4:kite.num_flap_C-1])), 
-        reduce(vcat, collect(sys.pos[:, kite.num_flap_D+1:kite.num_A])),
-        vcat(sys.tether_length),
         sys.heading_y,
-        sys.depower,
-        # sys.winch_force[3]
+        sys.turn_rate_y,
+        vcat(sys.flap_angle),
+        vcat(sys.flap_vel),
+        vcat(sys.tether_length),
+        vcat(sys.tether_vel),
     )
 
     # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, states, nu, nx, ny = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
-    nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
-    setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
+    f!, h!, simple_state, nu, nx, nsx, ny = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
+    # nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
+    # setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
 
-    linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, ry = 
-        reset!(sys, nonlinmodel, x0, u0, ny, Ts, ry, noise, buffer_time)
+    linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, ry =
+        reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry, noise, buffer_time, f!, h!)
 
     ci = ControlInterface(
-        inputs = inputs,
-        outputs = outputs,
-        x0 = x0,
-        u0 = u0,
-        linmodel = linmodel,
-        kite = kite,
-        nonlinmodel = nonlinmodel,
-        mpc = mpc,
-        optim = optim,
-        Ts = Ts,
-        U_data = U_data,
-        Y_data = Y_data,
-        Ry_data = Ry_data,
-        X̂_data = X̂_data,
-        ry = ry,
-        output_idxs = output_idxs,
-        observed_idxs = observed_idxs,
-        y_noise = y_noise,
+        inputs=inputs,
+        outputs=outputs,
+        x0=x0,
+        x_simple_0=x_simple_0,
+        u0=u0,
+        linmodel=linmodel,
+        kite=kite,
+        mpc=mpc,
+        optim=optim,
+        Ts=Ts,
+        U_data=U_data,
+        Y_data=Y_data,
+        Ry_data=Ry_data,
+        X̂_data=X̂_data,
+        ry=ry,
+        output_idxs=output_idxs,
+        observed_idxs=observed_idxs,
+        y_noise=y_noise,
     )
     return ci
 end
 
-function reset!(ci::ControlInterface; 
-        x0::Vector{Float64}=ci.x0,
-        u0::Vector{Float64}=ci.u0, 
-        ry::Union{Nothing, Vector{Float64}}=nothing, 
-        noise::Float64=1e-3,
-        buffer_time::Int=20
-        )
+include("mtk_interface.jl")
+include("smartdiff.jl")
+
+function reset!(ci::ControlInterface;
+    x0::Vector{Float64}=ci.x0,
+    u0::Vector{Float64}=ci.u0,
+    ry::Union{Nothing,Vector{Float64}}=nothing,
+    noise::Float64=1e-3,
+    buffer_time::Int=20
+)
     ci.linmodel, ci.mpc, ci.output_idxs, ci.observed_idxs, ci.optim, ci.U_data, ci.Y_data, ci.Ry_data, ci.X̂_data, ci.y_noise, ci.ry =
-        reset!(ci.kite.prob.f.sys, ci.nonlinmodel, x0, u0, ci.linmodel.ny, ci.Ts, ry, noise, buffer_time)
+        reset!(ci.kite.prob.f.sys, x0, u0, ci.linmodel.ny, ci.Ts, ry, noise, buffer_time)
     return nothing
 end
-function reset!(sys, nonlinmodel, x0, u0, ny, Ts, ry, noise, buffer_time)
+function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, ny, nu, Ts, ry, noise, buffer_time, f!, h!)
     # --- linearize model ---
-    linmodel = linearize(nonlinmodel; x=x0, u=u0)
+    x_simple_0 = zeros(nsx)
+    linmodel = linearize(sys, f!, h!, nsx, nu,
+        string.(simple_state), string.(inputs),
+        x0, x_simple_0, u0, Ts; time_multiplier=10)
 
     # --- initialize outputs and plotting indexes ---
     if isnothing(ry)
         y0 = zeros(ny)
-        nonlinmodel.h!(y0, x0, nothing, nothing)
+        h!(y0, x0)
         ry = y0
         ry[idx(linmodel.yname, sys.heading_y)] = deg2rad(0.0)
         ry[idx(linmodel.yname, sys.depower)] = 0.45
@@ -165,8 +167,8 @@ function reset!(sys, nonlinmodel, x0, u0, ny, Ts, ry, noise, buffer_time)
 
     σR = fill(1e-4, linmodel.ny)
     σQ = fill(1e2, linmodel.nx)
-    σQint_u=fill(1, linmodel.nu)
-    nint_u=fill(1, linmodel.nu)
+    σQint_u = fill(1, linmodel.nu)
+    nint_u = fill(1, linmodel.nu)
     estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
 
     Hp, Hc = 100, 2
@@ -203,7 +205,7 @@ end
 function lin_ulin_sim(ci::ControlInterface)
     println("linear sanity check")
     u = [-0, -50, -70]
-    res = sim!(ci.linmodel, 10, u; x0 = ci.x0)
+    res = sim!(ci.linmodel, 10, u; x0=ci.x0)
     p1 = plot(res; plotx=false, ploty=ci.output_idxs, plotu=false, size=(900, 900))
     display(p1)
     # println("nonlinear sanity check")
@@ -216,12 +218,13 @@ end
 function step!(ci::ControlInterface, y; ry=ci.ry)
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
+    linearize!(ci, ci.linmodel, x̂[1:ci.linmodel.nx], u)
+    setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
     pop_append!(ci.Ry_data, ry)
     pop_append!(ci.X̂_data, x̂)
     updatestate!(ci.mpc, u, y)
-    @assert ci.plotting = true
     return u
 end
 
@@ -242,7 +245,9 @@ function start_processes!(ci::ControlInterface)
     plot_thread = Threads.@spawn plot_process(ci)
     return plot_thread
 end
-function stop_processes!(ci::ControlInterface) ci.plotting = false end
+function stop_processes!(ci::ControlInterface)
+    ci.plotting = false
+end
 
 function controlplot(ci::ControlInterface)
     res = SimResult(ci.mpc, ci.U_data, ci.Y_data; ci.Ry_data, ci.X̂_data)
@@ -251,7 +256,6 @@ end
 
 
 function linearize_process(ci::ControlInterface)
-    ModelPredictiveControl.linearize!(ci.linmodel, ci.nonlinmodel; x, u)
     linearize!(ci.linmodel)
     setmodel!(mpc, linmodel)
     xnext = zeros(length(x))

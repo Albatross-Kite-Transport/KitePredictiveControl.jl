@@ -22,19 +22,9 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     end
     create_default = make_default_creator(state)
 
-    integ_cache = GeneralLazyBufferCache(
-        function (xu)
-            x = xu[1:nx]
-            u = xu[nx+1:end]
-            default = create_default(x)
-            par = vcat([inputs[i] => u[i] for i in 1:nu])
-            prob = ODEProblem(sys, default, (0.0, Ts), par)
-            setu! = setp(prob, [inputs[i] for i in 1:nu])
-            get_simple_x = getu(prob, simple_state)
-            integrator = OrdinaryDiffEqCore.init(prob, solver; saveat=Ts, abstol=kite.set.abs_tol, reltol=kite.set.rel_tol, verbose=false)
-            return (integrator, setu!, get_simple_x)
-        end
-    )
+    setu! = setp(kite.prob, [inputs[i] for i in 1:nu])
+    get_simple_x = getu(kite.prob, simple_state)
+    integrator = kite.integrator
 
     """
     Nonlinear discrete dynamics. Takes in complex state and returns simple state_plus
@@ -43,28 +33,29 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
         (integ, setu!, get_simple_x) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0+dt)
         setu!(integ, u)
-        OrdinaryDiffEqCore.step!(integ, dt, true)
+        OrdinaryDiffEq.step!(integ, dt, true)
         @assert successful_retcode(integ.sol)
         x_simple_plus[1:nx_simple-1] .= get_simple_x(integ)
         x_simple_plus[end] = 1
         return x_simple_plus
     end
     function f!(x_simple_plus, x, u, dt)
-        next_step!(x_simple_plus, x, u, dt, integ_cache[vcat(x, u)])
+        next_step!(x_simple_plus, x, u, dt, (integrator, setu!, get_simple_x))
     end 
 
     "Observer function"
     function get_y!(y, x, integ_setu_pair)
         (integ, _, _) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0+Ts)
-        y .= get_y(integ)
+        y[1:nx_simple-1] .= get_y(integ)
+        y[end] = 1
         return y
     end
-    h!(y, x) = get_y!(y, x, integ_cache[vcat(x, zeros(3))])
+    h!(y, x) = get_y!(y, x, (integrator, setu!, get_simple_x))
 
     return (f!, h!, simple_state, nu, nx, nx_simple, ny)
 end
 
-function ModelingToolkit.variable_index(name::Vector{String}, var)
+function variable_index(name::Vector{String}, var)
     return findfirst(x -> x == string(var), name)
 end
