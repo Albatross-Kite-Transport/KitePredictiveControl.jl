@@ -85,7 +85,7 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
     nsx = linmodel.nx
     x_simple_plus = linmodel.buffer.x
     h!(x_simple_0, x0)
-    steering_u = [-0.2, 0.2]
+    steering_u = [0.1, -0.1]
     middle_u = [-5.0, 5.0]
     nm = length(middle_u) * nu # number of measurements
     U = zeros(nm, nu)
@@ -103,8 +103,8 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
 
     # --- solve ---
     for i in 1:nsx
-        nz_idxs = findall(!iszero, AB_pattern[i, :])
-        if !isempty(nz_idxs)
+        if !isempty(findall(!iszero, AB_pattern[i, nsx+1:end]))
+            nz_idxs = findall(!iszero, AB_pattern[i, :])
             Z = XU[:, nz_idxs]
             AB[i, nz_idxs] .= Z \ X_prime[:, i]
         end
@@ -124,41 +124,6 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
     linmodel.fop .= linmodel.A * x_simple_0 + linmodel.Bu * u0
     linmodel.x0 .= 0
     return linmodel
-end
-
-function test_diff()
-    u_test = u0 - [10.0, 0.0, 0.0]
-    ulin_heading = []
-    lin_heading = []
-    for i in 1:20
-        reps = 40
-        u_test = u0 - [0, i, 0]
-        init_sim!(kite; prn=false, torque_control=true, init_set_values)
-        next_step!(kite; set_values=u_test, dt=Ts)
-        for _ in 1:reps
-            next_step!(kite; set_values=u_test, dt=Ts)
-        end
-        x_simple_plus = vcat(get_y(kite.integrator), 1)
-
-        lin_plus = dss.A * x_simple_0 + dss.B * u_test
-        for _ in 1:reps
-            lin_plus = dss.A * lin_plus + dss.B * u_test
-        end
-
-        append!(ulin_heading, x_simple_plus[1])
-        append!(lin_heading, lin_plus[1])
-    end
-    plot()
-    plot!(ulin_heading)
-    display(plot!(lin_heading))
-
-    u_test = u0 - [10.0, 0.0, 0.0]
-    f!(x_simple_plus, x0, u_test)
-    lin_plus = dss.A * x_simple_0 + dss.B * u_test
-    diff_ulin = norm(x_simple_plus .- x_simple_0)
-    diff_lin = norm(lin_plus .- x_simple_0)
-
-    println("diff_ulin: ", diff_ulin, "\ndiff_lin: ", diff_lin)
 end
 
 

@@ -31,7 +31,6 @@ function generate_f_h(kite::KPS4_3L, inputs, outputs, solver, Ts)
     """
     function next_step!(x_simple_plus, x, u, dt, integ_setu_pair)
         (integ, setu!, get_simple_x) = integ_setu_pair
-        @show u
         reinit!(integ, x; t0=1.0, tf=1.0 + dt)
         setu!(integ, u)
         OrdinaryDiffEq.step!(integ, dt, true)

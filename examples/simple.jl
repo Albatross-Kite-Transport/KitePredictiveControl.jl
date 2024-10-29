@@ -1,6 +1,6 @@
 using Revise, KitePredictiveControl, KiteModels, ControlPlots
 
-Ts = 0.1
+Ts = 0.05
 if !@isdefined kite_real
     kite_real = KPS4_3L(KCU(se("system_3l.yaml")))
     kite_model = KPS4_3L(KCU(se("system_3l.yaml"))) # TODO: different sim vs real system
@@ -13,7 +13,7 @@ next_step!(kite_real; set_values = init_set_values, dt = 1.0)
 next_step!(kite_model; set_values = init_set_values, dt = 1.0)
 
 # if !@isdefined(ci)
-    ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=init_set_values)
+    ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=init_set_values, noise=0.0)
 # else
 #     reset!(ci; u0=init_set_values)
 # end
@@ -25,7 +25,7 @@ function wanted_heading_y(t)
     if t < 10.0
         wanted_heading_y = 0.0
     elseif t < 100.0
-        wanted_heading_y = deg2rad(1)
+        wanted_heading_y = deg2rad(20)
     elseif t < 200.0
         wanted_heading_y = -deg2rad(-1)
     else
@@ -34,7 +34,7 @@ function wanted_heading_y(t)
     return wanted_heading_y
 end
 
-total_time = 20
+total_time = 40
 try
     start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))

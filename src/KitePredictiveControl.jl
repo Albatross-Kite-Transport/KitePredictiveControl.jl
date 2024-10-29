@@ -52,7 +52,7 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     y_noise::Vector{Float64}
     error::Float64 = 0.0
     "how many time steps to look into the future when linearizing"
-    time_multiplier::Int = 10
+    time_multiplier::Int = 40
     plotting::Bool = true
     # linearized_channel::Channel{ModelPredictiveControl.LinMPC} = Channel{ModelPredictiveControl.LinMPC}(1)
     # stepped_channel::Channel{Tuple{ModelPredictiveControl.LinMPC,
@@ -71,7 +71,8 @@ function ControlInterface(
     u0::Vector{Float64}=zeros(3),
     ry::Union{Nothing,Vector{Float64}}=nothing,
     noise::Float64=1e-3,
-    buffer_time::Int=20
+    buffer_time::Int=20,
+    time_multiplier::Int=10,
 )
     x0 = copy(x0)
     # --- get symbolic inputs and outputs ---
@@ -92,7 +93,7 @@ function ControlInterface(
     # setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
 
     linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, x_simple_0, ry, AB, AB_pattern =
-        reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
+        reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
 
     ci = ControlInterface(
         inputs=inputs,
@@ -117,6 +118,7 @@ function ControlInterface(
         y_noise=y_noise,
         AB=AB,
         AB_pattern=AB_pattern,
+        time_multiplier=time_multiplier
     )
     return ci
 end
@@ -135,7 +137,7 @@ function reset!(ci::ControlInterface;
         reset!(ci.kite.prob.f.sys, x0, u0, ci.linmodel.ny, ci.Ts, ry, noise, buffer_time)
     return nothing
 end
-function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
+function reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
     # function yidx(name::Vector{String}, var)
     #     return findfirst(x -> x == string(var), name)
     # end
@@ -146,7 +148,7 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noi
     x_simple_0 = zeros(nsx)
     linmodel, AB, AB_pattern = linearize(sys, f!, h!, nsx, nu,
         string.(simple_state), string.(inputs),
-        x0, x_simple_0, u0, Ts; time_multiplier=10)
+        x0, x_simple_0, u0, Ts; time_multiplier)
 
     # --- initialize outputs and plotting indexes ---
     if isnothing(ry)
@@ -174,13 +176,13 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noi
     )
 
     Mwt = fill(0.0, linmodel.ny)
-    Mwt[yidx(sys.heading_y)] = 1.0 / deg2rad(5.0)
-    Mwt[yidx(sys.depower)] = 1.0 / deg2rad(90)
+    Mwt[yidx(sys.heading_y)] = 10.0
+    Mwt[yidx(sys.depower)] = 0.0
     # Mwt[yidx(sys.tether_length[1])] = 0.1
     # Mwt[yidx(sys.tether_length[2])] = 0.1
-    Mwt[yidx(sys.tether_length[3])] = 1.0 / 10.0
+    Mwt[yidx(sys.tether_length[3])] = 0.001
     Nwt = fill(0.0, linmodel.nu)
-    Lwt = fill(0.1, linmodel.nu)
+    Lwt = fill(0.005, linmodel.nu)
 
     σR = fill(1e-4, linmodel.ny)
     σQ = fill(1e2, linmodel.nx)
@@ -197,14 +199,7 @@ function reset!(sys, simple_state, inputs, outputs, x0, u0, nsx, nu, Ts, ry, noi
     # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
     ymin = fill(-Inf, linmodel.ny)
     ymax = fill(Inf, linmodel.ny)
-    # ymin[yidx(sys.tether_length[1])] = 57.0
-    # ymin[yidx(sys.tether_length[2])] = 57.0
-    # ymin[yidx(sys.tether_length[3])] = x0[xidx(sys.tether_length[3])] - 1.0
-    # ymax[yidx(sys.tether_length[1])] = x0[xidx(sys.tether_length[1])] + 0.3
-    # ymax[yidx(sys.tether_length[2])] = x0[xidx(sys.tether_length[2])] + 0.3
-    # ymax[yidx(sys.tether_length[3])] = x0[xidx(sys.tether_length[3])] + 1.0
-    # ymin[end] = -1000
-    # ymax[end] = 1000
+    ymax[yidx(sys.depower)] = 0.6
     setconstraint!(mpc; umin, umax, ymin, ymax)
     # initstate!(mpc, zeros(3), y0) # TODO: check if needed
 
@@ -235,11 +230,12 @@ end
 function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     if !isnothing(rheading)
         ci.ry[1] = rheading
-        @show ci.linmodel.yname[1]
     end
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
     linearize!(ci, ci.linmodel, x, u)
+    display(linearization_plot(ci, x, u))
+    @show ci.linmodel.A[1, 2]
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
@@ -258,7 +254,7 @@ end
 
 function plot_process(ci::ControlInterface)
     while ci.plotting
-        display(controlplot(ci))
+        # display(controlplot(ci))
     end
 end
 function start_processes!(ci::ControlInterface)
@@ -275,6 +271,26 @@ function controlplot(ci::ControlInterface)
     return Plots.plot(res; plotx=false, plotxwithx̂=ci.observed_idxs, ploty=ci.output_idxs, plotu=true, size=(1200, 900))
 end
 
+"""
+Plot the linearization projected n timesteps into the future
+"""
+function linearization_plot(ci::ControlInterface, x0, u0; n::Int=10)
+    linmodel = deepcopy(ci.linmodel)
+    u = u0 .+ [0.0, -5.0, 0.0]
+    x_simple_0 = copy(linmodel.xop)
+    ci.h!(x_simple_0, x0)
+
+    x_simple_plus = similar(x_simple_0)
+    ci.f!(x_simple_plus, x0, u, ci.Ts*n)
+    lin_plus = linmodel.A * x_simple_0 + linmodel.Bu * u
+    for _ in 1:n-1
+        lin_plus = linmodel.A * lin_plus + linmodel.Bu * u
+    end
+    p = plot()
+    plot!(p, [0.0, x_simple_plus[1]], label="nonlin")
+    plot!(p, [0.0, lin_plus[1]], label="lin", ylim=(-0.01, 0.01))
+    return p
+end
 
 function linearize_process(ci::ControlInterface)
     linearize!(ci.linmodel)
