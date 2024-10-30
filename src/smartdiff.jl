@@ -114,7 +114,7 @@ function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, 
         if !isempty(findall(!iszero, AB_pattern[i, nsx+1:end]))
             optimize_idxs = findall(!iszero, AB_pattern[i, :])
             Z = XU[:, optimize_idxs]
-            "AB * XU = X_prime"
+            "XU * AB = X_prime"
             AB[i, optimize_idxs] .= Z \ X_prime[:, i]
         end
     end

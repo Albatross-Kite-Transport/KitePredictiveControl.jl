@@ -26,20 +26,11 @@ next_step!(kite_model; set_values = init_set_values, dt = 1.0)
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
 
 function wanted_heading_y(t)
-    wanted_heading_y = 0.0
-    if t < 10.0
-        wanted_heading_y = 0.0
-    elseif t < 100.0
-        wanted_heading_y = deg2rad(20)
-    elseif t < 200.0
-        wanted_heading_y = -deg2rad(-1)
-    else
-        wanted_heading_y = deg2rad(5)
-    end
+    wanted_heading_y = deg2rad(5) * cos(2 * π * t / 40)
     return wanted_heading_y
 end
 
-total_time = 40
+total_time = 20
 try
     start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))
