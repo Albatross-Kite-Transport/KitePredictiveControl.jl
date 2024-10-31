@@ -194,7 +194,7 @@ function reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts,
     optim = JuMP.Model(HiGHS.Optimizer)
     mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
 
-    umin, umax = [-20, -20, -500], [0.0, 0.0, 0.0]
+    umin, umax = [-20, -20, -500], [0.0, 0.0, 0.0] # TODO: torque control with u0 = -winch_forces * drum_radius
     # max = 0.5
     # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
     ymin = fill(-Inf, linmodel.ny)

@@ -1,22 +1,42 @@
 """
-heading_y'   = turn_rate_y    +   0 * set_value
-turn_rate_y' = k_1 * one      +   k_4 * set_value
 
-flap_angle' = flap_vel          +   0 * set_value
-flap_vel'   = acc = k_2 * one   +   k_5 * set_value
+torque control with uop = -winch_force(s)*0.11
 
-tether_length'  = tether_vel        +   0 * set_value
-tether_vel'     = acc = k_3 * one   +   k_6 * set_value
+1.
+heading_y'   = turn_rate_y
+turn_rate_y' = k * diff
+diff = flap_angle[2] - flap_angle[1]
+
+    set_value .= -winch_force(s)*0.11
+    set_value[2] += 5.0
+    set_value[1] -= 5.0
+    next_step!(kite; dt="at least 0.2, doesnt matter that much")
+    k = turn_rate / diff
+
+2.
+diff' = k * tether_diff' + k * torque_diff
+
+    set_value .= -winch_force(s)*0.11
+    set_value[2] += 5.0
+    set_value[1] -= 5.0
+    next_step!(kite; dt="1/3 of Hp")
+    set_value .= -winch_force(s)*0.11
+    set_value[2] -= 5.0
+    set_value[1] += 5.0
+    next_step!(kite; dt="1/3 of Hp")
+    solve diff' = k1 * tether_diff_vel + k2 * torque_diff
+
+3.
+tether_diff'  = tether_diff_vel = k * set_value
+    set_value .= -winch_force(s)*0.11
+    set_value[2] += 5.0
+    set_value[1] -= 5.0
+    next_step!(kite; dt="at least 0.2, doesnt matter that much")
+    k = turn_rate / diff
 
 one' = 0.0
 
-
 X_prime = A * X + B * U
-
-... * A = X_prime
-
-
-c2d
 """
 
 # time_multiplier = 10
@@ -39,8 +59,8 @@ function generate_AB(sys, nsx, nu, xname)
     A_pattern[idx(sys.turn_rate_y), nsx] = 1.0
     B_pattern[idx(sys.turn_rate_y), [1, 2]] .= 1.0
 
-    # --- depower ---
-    A_pattern[idx(sys.depower), idx(sys.depower_vel)] = 1.0
+    # --- flap diff ---
+    A_pattern[idx(sys.flap_diff), idx(sys.depower_vel)] = 1.0
     A_pattern[idx(sys.depower), nsx] = 1.0
     B_pattern[idx(sys.depower), 1:3] .= 1.0
     A_pattern[idx(sys.depower_vel), nsx] = 1.0
@@ -82,9 +102,9 @@ end
 Linearize using the known sparsity pattern (no sparse matrix as this allocates more).
 """
 function linearize!(ci::ControlInterface, linmodel::LinModel, x0, u0)
-    return linearize!(linmodel, ci.f!, ci.h!, ci.AB, ci.AB_pattern, x0, ci.x_simple_0, u0, ci.Ts; ci.time_multiplier)
+    return linearize!(linmodel, ci.f!, ci.h!, ci.AB, ci.AB_pattern, x0, ci.x_simple_0, u0; ci.time_multiplier)
 end
-function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, x0, x_simple_0, u0, Ts; time_multiplier=10.0)
+function linearize!(linmodel::LinModel, f!, h!, AB::Matrix, AB_pattern::Matrix, x0, x_simple_0, u0; Ts=0.05, time_multiplier=10.0)
     nu = linmodel.nu
     nsx = linmodel.nx
     x_simple_plus = linmodel.buffer.x
