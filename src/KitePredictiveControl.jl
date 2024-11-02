@@ -146,7 +146,7 @@ mutable struct ControlInterface
         optim = JuMP.Model(HiGHS.Optimizer)
         mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
     
-        umin, umax = [-5, -5, -20], [5, 5, 20] # TODO: torque control with u0 = -winch_forces * drum_radius
+        umin, umax = [-10, -10, -10], [10, 10, 10] # TODO: torque control with u0 = -winch_forces * drum_radius
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)
@@ -202,7 +202,7 @@ function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
     linearize!(ci, ci.linmodel, x, u)
-    display(linearization_plot(ci, x, u))
+    # display(linearization_plot(ci, x, u))
     @show ci.linmodel.A[1, 2]
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
@@ -222,7 +222,7 @@ end
 
 function plot_process(ci::ControlInterface)
     while ci.plotting
-        # display(controlplot(ci))
+        display(controlplot(ci))
     end
 end
 function start_processes!(ci::ControlInterface)

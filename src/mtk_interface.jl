@@ -17,6 +17,7 @@ function generate_f_h(kite::KPS4_3L, simple_state, measure_state, inputs, Ts)
     setu! = setp(kite.prob, [inputs[i] for i in 1:nu])
     get_simple_x = getu(kite.prob, simple_state)
     get_measure_x = getu(kite.prob, measure_state)
+    get_winch_force = getu(kite.prob, sys.winch_force)
     integrator = kite.integrator
 
     """
@@ -25,7 +26,7 @@ function generate_f_h(kite::KPS4_3L, simple_state, measure_state, inputs, Ts)
     function step!(x, u, dt, integ_setu_pair)
         (integ, setu!) = integ_setu_pair
         reinit!(integ, x; t0=1.0, tf=1.0 + dt)
-        uop = -kite.get_winch_forces(integ) * kite.set.drum_radius
+        uop = -get_winch_force(integ) * kite.set.drum_radius
         setu!(integ, u .+ uop)
         OrdinaryDiffEq.step!(integ, dt, true)
         @assert successful_retcode(integ.sol)

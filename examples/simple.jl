@@ -18,7 +18,7 @@ ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=zeros(3), nois
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
 
 function wanted_heading_y(t)
-    wanted_heading_y = deg2rad(5) * cos(2 * π * t / 40)
+    wanted_heading_y = deg2rad(5) * (cos(2 * π * t / 40) - 1.0)
     return wanted_heading_y
 end
 # @assert false
@@ -33,7 +33,7 @@ try
         y = zeros(ci.linmodel.ny)
         ci.simple_h!(y, kite_real.integrator.u)
         set_values = KitePredictiveControl.step!(ci, kite_real.integrator.u, y; rheading=wanted_heading_y(t))
-        real = @elapsed next_step!(kite_real; set_values, dt = Ts)
+        real = @elapsed next_step!(kite_real; set_values = set_values .- winch_force(kite_real) * kite_real.set.drum_radius, dt = Ts)
         # plot2d(kite_real.pos, (i-1)*Ts; zoom=false, front=false, xlim=(-35, 35), ylim=(0, 70))
         pause_t = Ts - (time() - start_t)
         println("Run percentage: ", (time() - start_t)/Ts*100)
