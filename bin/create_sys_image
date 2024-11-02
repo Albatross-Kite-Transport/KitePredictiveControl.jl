@@ -1,2 +1,8 @@
 #!/bin/bash
 
+julia --project=. -e '
+using Pkg
+Pkg.update()
+using PackageCompiler
+PackageCompiler.create_sysimage(:KitePredictiveControl, sysimage_path="bin/kitepredictivecontrol.so")
+'

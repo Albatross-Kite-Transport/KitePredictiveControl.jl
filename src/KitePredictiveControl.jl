@@ -1,111 +1,284 @@
-# module KitePredictiveControl
+module KitePredictiveControl
 
 using ModelPredictiveControl
-using ModelingToolkit
-using KiteModels, ControlSystems, Plots, Serialization, OrdinaryDiffEq, RuntimeGeneratedFunctions, LinearAlgebra, SymbolicIndexingInterface
-using JuMP, DAQP, MadNLP, SeeToDee, NonlinearSolve, ForwardDiff # solvers
-using ControlSystemIdentification, ControlSystemsBase
+using PrecompileTools: @setup_workload, @compile_workload
+using KiteModels, ControlSystems, Serialization, OrdinaryDiffEq,
+    LinearAlgebra, Plots, Base.Threads
+using JuMP, HiGHS # solvers
+using Parameters
+using SymbolicIndexingInterface: parameter_values, state_values
+using ModelingToolkit: variable_index as idx, unknowns
+using ModelingToolkit.SciMLBase: successful_retcode
+using SymbolicIndexingInterface: getu, setp
+import Symbolics: Num
 
-# export run_controller
+export ControlInterface
+export step!, controlplot, start_processes!, stop_processes!
+
+set_data_path(joinpath(@__DIR__, "..", "data"))
+mutable struct ControlInterface
+    "symbolic inputs"
+    inputs::Vector{Num}
+    "symbolic outputs"
+    outputs::Vector{Num}
+    "initial inputs"
+    u0::Vector{Float64}
+    "initial state"
+    x0::Vector{Float64}
+    "wanted outputs"
+    ry::Vector{Float64}
+    "sampling time [seconds]"
+    Ts::Float64
+    "predict horizon [number of steps]"
+    Hp::Int
+    "nonlinear KiteModels.jl model"
+    kite::KiteModels.KPS4_3L
+    "complex x0 to simple x_plus nonlinear function"
+    measure_f!::Function
+    simple_f!::Function
+    "observer function"
+    simple_h!::Function
+    "linearized model of the kite"
+    linmodel::ModelPredictiveControl.LinModel
+    "measurement matrixes X_plus, X and U"
+    measurements::Tuple{Matrix{Float64}, Matrix{Float64}, Matrix{Float64}}
+    mpc::ModelPredictiveControl.LinMPC
+    optim::JuMP.Model
+    U_data::Matrix{Float64}
+    Y_data::Matrix{Float64}
+    Ry_data::Matrix{Float64}
+    X̂_data::Matrix{Float64}
+    output_idxs::Vector{Int}
+    observed_idxs::Vector{Int}
+    s_idxs::Dict{Num, Int}
+    m_idxs::Dict{Num, Int}
+    y_noise::Vector{Float64}
+    error::Float64
+    plotting::Bool
+
+    function ControlInterface(
+        kite::KPS4_3L;
+        Ts::Float64=0.05,
+        x0::Vector{Float64}=kite.integrator.u,
+        u0::Vector{Float64}=zeros(3),
+        ry::Union{Nothing,Vector{Float64}}=nothing,
+        noise::Float64=1e-3,
+        buffer_time::Int=20,
+        time_multiplier::Int=10,
+    )
+        x0 = copy(x0)
+        # --- get symbolic inputs and outputs ---
+        sys = kite.prob.f.sys
+        inputs = [sys.set_values[i] for i in 1:3]
+        measure_state = vcat(
+            sys.heading_y,
+            sys.turn_rate_y,
+            sys.flap_diff,
+            sys.flap_diff_vel,
+            sys.tether_diff,
+            sys.tether_diff_vel,
+            vcat(sys.tether_length),
+            vcat(sys.tether_vel)
+        )
+        simple_state = vcat(
+            sys.heading_y,
+            sys.flap_diff,
+            vcat(sys.tether_length),
+        )
+        outputs = simple_state
+    
+        s_idxs = Dict{Num, Int}()
+        for (s_idx, sym) in enumerate(simple_state)
+            s_idxs[sym] = s_idx
+        end
+        m_idxs = Dict{Num, Int}()
+        for (m_idx, sym) in enumerate(measure_state)
+            m_idxs[sym] = m_idx
+        end
+    
+        # --- generate f and h functions for linearization ---
+        (simple_f!, measure_f!, simple_h!, simple_state, nu, nsx, nmx) = generate_f_h(kite, simple_state, measure_state, inputs, Ts)
+    
+        # --- linearize model ---
+        Hp, Hc = 20, 1
+        linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, nmx, nu,
+            string.(simple_state), string.(inputs),
+            x0, u0, Ts, Hp)
+    
+        # --- initialize outputs and plotting indexes ---
+        if isnothing(ry)
+            y0 = zeros(nsx)
+            simple_h!(y0, x0)
+            ry = y0
+            ry[s_idxs[sys.heading_y]] = deg2rad(0.0)
+        end
+        output_idxs = vcat(
+            s_idxs[sys.heading_y],
+            s_idxs[sys.flap_diff],
+            s_idxs[sys.tether_length[1]],
+            s_idxs[sys.tether_length[2]],
+            s_idxs[sys.tether_length[3]],
+        )
+        observed_idxs = vcat(
+            # s_idxs[sys.pos[2, kite.num_A]],
+            s_idxs[sys.heading_y],
+            s_idxs[sys.flap_diff],
+            s_idxs[sys.tether_length[1]],
+            s_idxs[sys.tether_length[2]],
+            s_idxs[sys.tether_length[3]],
+            # linmodel.nx + linmodel.ny
+        )
+    
+        Mwt = fill(0.0, linmodel.ny)
+        Mwt[s_idxs[sys.heading_y]] = 10.0
+        # Mwt[s_idxs[sys.tether_length[1])] = 0.1
+        # Mwt[s_idxs[sys.tether_length[2])] = 0.1
+        Mwt[s_idxs[sys.tether_length[3]]] = 0.1
+        Nwt = fill(0.0, linmodel.nu)
+        Lwt = fill(0.5, linmodel.nu)
+    
+        σR = fill(1e-4, linmodel.ny)
+        σQ = fill(1e2, linmodel.nx)
+        σQint_u = fill(1, linmodel.nu)
+        nint_u = fill(1, linmodel.nu)
+        estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
+    
+        optim = JuMP.Model(HiGHS.Optimizer)
+        mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
+    
+        umin, umax = [-1, -1, -1], [1, 1, 1] # TODO: torque control with u0 = -winch_forces * drum_radius
+        # max = 0.5
+        # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
+        ymin = fill(-Inf, linmodel.ny)
+        ymax = fill(Inf, linmodel.ny)
+        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 0.1
+        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 0.1
+        ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
+        setconstraint!(mpc; umin, umax, ymin, ymax)
+        # initstate!(mpc, zeros(3), y0) # TODO: check if needed
+    
+        # --- init data ---
+        N = Int(round(buffer_time / Ts)) # buffer time is the amount of time to save
+        U_data = fill(NaN, linmodel.nu, N)
+        Y_data = fill(NaN, linmodel.ny, N)
+        Ry_data = fill(NaN, linmodel.ny, N)
+        X̂_data = fill(NaN, estim.nx̂, N)
+        y_noise = fill(noise, linmodel.ny)
+        error = 0.0
+        plotting = true
+        
+        return new(
+            inputs, outputs, u0, x0, ry, Ts, Hp,
+            kite, measure_f!, simple_f!, simple_h!, linmodel, measurements, 
+            mpc, optim, U_data, Y_data, Ry_data, X̂_data, 
+            output_idxs, observed_idxs, s_idxs, m_idxs,
+            y_noise, error, plotting
+        )
+    end
+end
+
+
+
 
 include("mtk_interface.jl")
+include("smartdiff.jl")
 
-set_data_path(joinpath(pwd(), "data"))
-if ! @isdefined kite
-    kite::KPS4_3L = KPS4_3L(KCU(se("system_3l.yaml")))
-    kite.torque_control = true
-    KiteModels.init_sim!(kite; prn=true, torque_control=true)
+function lin_ulin_sim(ci::ControlInterface)
+    println("linear sanity check")
+    u = [-0, -50, -70]
+    res = sim!(ci.linmodel, 10, u; x0=ci.x0)
+    p1 = plot(res; plotx=false, ploty=ci.output_idxs, plotu=false, size=(900, 900))
+    display(p1)
+    # println("nonlinear sanity check")
+    # res = sim!(plant, 10, u; x0 = ci.x0)
+    # p2 = plot(res; plotx=false, ploty=false, plotu=false)
+    # savefig(plot(p1, p2, layout=(1, 2)), "zeros.png")
+    # @assert false
+end
+
+function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
+    if !isnothing(rheading)
+        ci.ry[1] = rheading
+    end
+    x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
+    u = moveinput!(ci.mpc, ry)
+    linearize!(ci, ci.linmodel, x, u)
+    # display(linearization_plot(ci, x, u))
+    @show ci.linmodel.A[1, 2]
+    setmodel!(ci.mpc, ci.linmodel)
+    pop_append!(ci.U_data, u)
+    pop_append!(ci.Y_data, y)
+    pop_append!(ci.Ry_data, ry)
+    pop_append!(ci.X̂_data, x̂)
+    updatestate!(ci.mpc, u, y)
+    return u
+end
+
+function pop_append!(A::Matrix, vars::Vector)
+    A[:, 1] .= 0
+    A .= A[1:size(A, 1), vcat(2:size(A, 2), 1)]
+    A[:, end] .= vars
+    nothing
+end
+
+function plot_process(ci::ControlInterface)
+    while ci.plotting
+        display(controlplot(ci))
+    end
+end
+function start_processes!(ci::ControlInterface)
+    ci.plotting = true
+    plot_thread = Threads.@spawn plot_process(ci)
+    return plot_thread
+end
+function stop_processes!(ci::ControlInterface)
+    ci.plotting = false
+end
+
+function controlplot(ci::ControlInterface)
+    res = SimResult(ci.mpc, ci.U_data, ci.Y_data; ci.Ry_data, ci.X̂_data)
+    return Plots.plot(res; plotx=false, plotxwithx̂=ci.observed_idxs, ploty=ci.output_idxs, plotu=true, size=(1200, 900))
+end
+
+"""
+Plot the linearization projected n timesteps into the future
+"""
+function linearization_plot(ci::ControlInterface, x0, u0; n::Int=10)
+    linmodel = deepcopy(ci.linmodel)
+    u = u0 .+ [0.0, 1.0, 0.0]
+    x_simple_0 = copy(linmodel.xop)
+    ci.simple_h!(x_simple_0, x0)
+
+    x_simple_plus = similar(x_simple_0)
+    ci.simple_f!(x_simple_plus, x0, u, ci.Ts*n)
+    lin_plus = linmodel.A * x_simple_0 + linmodel.Bu * u
+    for _ in 1:n-1
+        lin_plus = linmodel.A * lin_plus + linmodel.Bu * u
+    end
+    p = plot()
+    idx = 1
+    plot!(p, [x_simple_0[idx], x_simple_plus[idx]], label="nonlin")
+    plot!(p, [x_simple_0[idx], lin_plus[idx]], label="lin", ylim=(-0.01, 0.01))
+    return p
+end
+
+function linearize_process(ci::ControlInterface)
+    linearize!(ci.linmodel)
+    setmodel!(mpc, linmodel)
+    xnext = zeros(length(x))
+    ModelPredictiveControl.f!(xnext, linmodel, x, u, nothing, nothing)
+    ci.error = (norm(xnext .- x) - norm(linmodel.fop .- x)) / norm(linmodel.fop .- x)
+    # @show norm(linmodel.fop .- linmodel.xop)
+    # @show norm((linmodel.A * linmodel.xop + linmodel.Bu * linmodel.uop) .- linmodel.xop)
+end
+# @setup_workload begin
+#     @compile_workload begin
+#         init_set_values=[-0.1, -0.1, -70.0]
+#         kite_model = KPS4_3L(KCU(se("system_3l.yaml")))
+#         init_sim!(kite_model; prn=true, torque_control=true, init_set_values)
+#         ci = ControlInterface(kite_model; Ts=0.05, u0=init_set_values)
+#         nothing
+#     end
+# end
 
 end
-kite_model, inputs = model!(kite, kite.pos, kite.vel)
-kite_model = complete(kite_model)
-outputs = vcat(
-    vcat(kite_model.flap_angle), 
-    reduce(vcat, collect(kite_model.pos[:, 1:kite.num_flap_C-1])), 
-    reduce(vcat, collect(kite_model.pos[:, kite.num_flap_D+1:kite.num_A])),
-    vcat(kite_model.tether_length)
-)
-initial_outputs = vcat(
-    vcat(kite.flap_angle), 
-    reduce(vcat, kite.pos[1:kite.num_flap_C-1]), 
-    reduce(vcat, kite.pos[kite.num_flap_D+1:kite.num_A]),
-    vcat(kite.tether_lengths)
-)
-
-[defaults(kite_model)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in 1:kite.num_flap_C-1]
-[defaults(kite_model)[kite_model.pos[j, i]] = kite.pos[i][j] for j in 1:3 for i in kite.num_flap_D+1:kite.num_A]
-[defaults(kite_model)[kite_model.flap_angle[i]] = kite.flap_angle[i] for i in 1:2]
-[defaults(kite_model)[kite_model.tether_length[i]] = kite.tether_lengths[i] for i in 1:3]
-
-Ts = 0.01
-N = 10
-
-lin_fun, simple_sys = ModelingToolkit.linearization_function(kite_model, inputs, outputs)
-@time (; A, B, C, D) = ModelingToolkit.linearize(simple_sys, lin_fun; t=1.0, op = defaults(kite_model));
-@time (; A, B, C, D) = ModelingToolkit.linearize(simple_sys, lin_fun; t=1.0, op = defaults(kite_model));
-
-css = ss(A, B, C, D)
-@time dss = c2d(continuous_ss, Ts)
-
-x_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), unknowns(simple_sys))
-u_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), inputs)
-y_0 = ModelingToolkit.varmap_to_vars(defaults(simple_sys), outputs)
-model = LinModel(dss.A, dss.B, dss.C, dss.B[:, end+1:end], dss.D[:, end+1:end], Ts)
-setstate!(model, x_0)
-# setop!(model, xop=x_0, yop=y_0, uop=u_0)
-model.uname .= string.(inputs)
-model.yname .= string.(outputs)
-model.xname .= string.(unknowns(kite.simple_sys))
- 
-tether_idxs = variable_index(kite.simple_sys, :tether_length)
-
-println("linear mpc")
-Hp, Hc = 40, 10
-umin, umax = [-50, -50, -200], [0, 0, 0]
-Mwt = fill(0, model.ny)
-output_idxs = [findfirst(x -> x == string(kite_model.tether_length[i]), model.yname) for i in 1:3]
-ratio = norm.(kite.winch_forces)[3] / norm.(kite.winch_forces)[1]
-Mwt[output_idxs] .= [1, 1, round(ratio)]
-Nwt = fill(0.001, model.nu)
-
-println("sanity check")
-u = [-10, -10, -500]
-res = sim!(model, N, u; x_0 = x_0)
-display(plot(res; plotx=tether_idxs, ploty=false, plotu=false))
-
-estim = SteadyKalmanFilter(model; nint_u=fill(1, model.nu), σQint_u=fill(0.1, model.nu), σQ = fill(0.1, model.nx), σR = fill(0.1, model.ny)) # sigma q important!
-mpc = NonLinMPC(estim; Hp, Hc, Mwt=Mwt, Nwt=Nwt, Cwt=Inf)
-mpc = setconstraint!(mpc; umin=umin, umax=umax)
-@time res = sim!(mpc, N, initial_outputs.-1.0, x_0 = x_0, lastu = [0, 0, 0]) # plant=model
-display(plot(res; plotx=false, ploty=output_idxs, plotu=true, plotxwithx̂=[2, 3, 1]))
-# display(plot(res; plotx=false, ploty=[output_idxs[3]], plotu=[3], plotxwithx̂=[3]))
-
-
-# println("nonlinear stepping")
-# function sim_adapt!(mpc, model, N, ry, plant, x_0, x̂_0, y_step=[0, 0])
-#     U_data, Y_data, Ry_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N)
-#     setstate!(plant, x_0)
-#     initstate!(mpc, [100, 100, -100], plant())
-#     setstate!(mpc, x̂_0)
-#     for i = 1:N
-#         @show i
-#         y = plant() + y_step
-#         x̂ = preparestate!(mpc, y)
-#         @show x̂
-#         u = moveinput!(mpc, ry)
-#         setmodel!(mpc, model)
-#         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
-#         updatestate!(mpc, u, y) # update mpc state estimate
-#         updatestate!(plant, u)  # update plant simulator
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data)
-#     return res
-# end
-
-# x̂_0 = vcat(x_0, wanted_outputs)
-# res_slin = sim_adapt!(nmpc, model, N, wanted_outputs, model, x_0, x̂_0)
-# display(plot(res_slin))
-
-nothing
-
-# end
