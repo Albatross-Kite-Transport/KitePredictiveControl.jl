@@ -5,23 +5,15 @@ if !@isdefined kite_real
     kite_real = KPS4_3L(KCU(se("system_3l.yaml")))
     kite_model = KPS4_3L(KCU(se("system_3l.yaml"))) # TODO: different sim vs real system
 end
-tol = 1e-3
-kite_real.set.abs_tol = tol
-kite_real.set.rel_tol = tol
-kite_model.set.abs_tol = tol
-kite_model.set.rel_tol = tol
+kite_real.set.l_tether = 21.0
+kite_model.set.l_tether = 21.0
+kite_real.set.elevation = 87
+kite_model.set.elevation = 87
+init_set_values = [-0.1, -0.1, -120.0]
+init_sim!(kite_real; prn=true, torque_control=true, init_set_values, ϵ=1e-3, flap_damping=0.1) # TODO: move to different core
+init_sim!(kite_model; prn=true, torque_control=true, init_set_values, ϵ=1e-3, flap_damping=0.1)
 
-init_set_values = [-0.1, -0.1, -70.0]
-init_sim!(kite_real; prn=true, torque_control=true, init_set_values) # TODO: move to different core
-init_sim!(kite_model; prn=true, torque_control=true, init_set_values)
-next_step!(kite_real; set_values = init_set_values, dt = 1.0)
-next_step!(kite_model; set_values = init_set_values, dt = 1.0)
-
-# if !@isdefined(ci)
-    ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=init_set_values, noise=0.0)
-# else
-#     reset!(ci; u0=init_set_values)
-# end
+ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=zeros(3), noise=0.0)
 
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
 
@@ -29,7 +21,7 @@ function wanted_heading_y(t)
     wanted_heading_y = deg2rad(5) * cos(2 * π * t / 40)
     return wanted_heading_y
 end
-
+# @assert false
 total_time = 20
 try
     start_processes!(ci)
@@ -39,7 +31,7 @@ try
         println("t = ", t)
 
         y = zeros(ci.linmodel.ny)
-        ci.h!(y, kite_real.integrator.u)
+        ci.simple_h!(y, kite_real.integrator.u)
         set_values = KitePredictiveControl.step!(ci, kite_real.integrator.u, y; rheading=wanted_heading_y(t))
         real = @elapsed next_step!(kite_real; set_values, dt = Ts)
         # plot2d(kite_real.pos, (i-1)*Ts; zoom=false, front=false, xlim=(-35, 35), ylim=(0, 70))

@@ -16,7 +16,7 @@ export ControlInterface
 export step!, controlplot, start_processes!, stop_processes!
 
 set_data_path(joinpath(@__DIR__, "..", "data"))
-struct ControlInterface
+mutable struct ControlInterface
     "symbolic inputs"
     inputs::Vector{Num}
     "symbolic outputs"
@@ -25,12 +25,12 @@ struct ControlInterface
     u0::Vector{Float64}
     "initial state"
     x0::Vector{Float64}
-    "initial simple state"
-    x_simple_0::Vector{Float64}
     "wanted outputs"
     ry::Vector{Float64}
-    "sampling time"
+    "sampling time [seconds]"
     Ts::Float64
+    "predict horizon [number of steps]"
+    Hp::Int
     "nonlinear KiteModels.jl model"
     kite::KiteModels.KPS4_3L
     "complex x0 to simple x_plus nonlinear function"
@@ -41,7 +41,7 @@ struct ControlInterface
     "linearized model of the kite"
     linmodel::ModelPredictiveControl.LinModel
     "measurement matrixes X_plus, X and U"
-    measurements::Vector{Matrix{Float64}}
+    measurements::Tuple{Matrix{Float64}, Matrix{Float64}, Matrix{Float64}}
     mpc::ModelPredictiveControl.LinMPC
     optim::JuMP.Model
     U_data::Matrix{Float64}
@@ -83,9 +83,9 @@ struct ControlInterface
         simple_state = vcat(
             sys.heading_y,
             sys.flap_diff,
-            sys.tether_diff,
             vcat(sys.tether_length),
         )
+        outputs = simple_state
     
         s_idxs = Dict{Num, Int}()
         for (s_idx, sym) in enumerate(simple_state)
@@ -101,10 +101,9 @@ struct ControlInterface
     
         # --- linearize model ---
         Hp, Hc = 40, 1
-        x_simple_0 = zeros(nsx)
-        linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, nsx, nmx, nu,
+        linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, nmx, nu,
             string.(simple_state), string.(inputs),
-            x0, x_simple_0, u0, Ts, Hp)
+            x0, u0, Ts, Hp)
     
         # --- initialize outputs and plotting indexes ---
         if isnothing(ry)
@@ -168,7 +167,7 @@ struct ControlInterface
         plotting = true
         
         return new(
-            inputs, outputs, u0, x0, x_simple_0, ry, Ts, 
+            inputs, outputs, u0, x0, ry, Ts, Hp,
             kite, measure_f!, simple_f!, simple_h!, linmodel, measurements, 
             mpc, optim, U_data, Y_data, Ry_data, X̂_data, 
             output_idxs, observed_idxs, s_idxs, m_idxs,
@@ -243,14 +242,14 @@ end
 """
 Plot the linearization projected n timesteps into the future
 """
-function linearization_plot(ci::ControlInterface, x0, u0; n::Int=5)
+function linearization_plot(ci::ControlInterface, x0, u0; n::Int=10)
     linmodel = deepcopy(ci.linmodel)
     u = u0 .+ [0.0, 1.0, 0.0]
     x_simple_0 = copy(linmodel.xop)
-    ci.h!(x_simple_0, x0)
+    ci.simple_h!(x_simple_0, x0)
 
     x_simple_plus = similar(x_simple_0)
-    ci.f!(x_simple_plus, x0, u, ci.Ts*n)
+    ci.simple_f!(x_simple_plus, x0, u, ci.Ts*n)
     lin_plus = linmodel.A * x_simple_0 + linmodel.Bu * u
     for _ in 1:n-1
         lin_plus = linmodel.A * lin_plus + linmodel.Bu * u
