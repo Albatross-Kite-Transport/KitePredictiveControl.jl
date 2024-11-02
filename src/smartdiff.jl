@@ -109,10 +109,9 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
     A .= 0.0
     B .= 0.0
 
-    @show Ts*Hp/3
     for i in eachindex(U[:, 1])
         x_plus = @view X_plus[i, :]
-        measure_f!(x_plus, x0, u0 .+ U[i, :], Ts*Hp/3) # *Hp/3
+        measure_f!(x_plus, x0, u0 .+ U[i, :], 0.5) # *Hp/3
     end
 
     # --- heading ---
@@ -120,7 +119,6 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
         1 : 2
     A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]] =
             X_plus[i, m_idxs[sys.turn_rate_y]] / X_plus[i, m_idxs[sys.flap_diff]]
-    @show A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]]
 
     # --- flap angle difference ---
     i = (X_plus[1, m_idxs[sys.tether_diff_vel]]) > (X_plus[2, m_idxs[sys.tether_diff_vel]]) ?

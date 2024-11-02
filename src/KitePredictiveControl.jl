@@ -100,7 +100,7 @@ mutable struct ControlInterface
         (simple_f!, measure_f!, simple_h!, simple_state, nu, nsx, nmx) = generate_f_h(kite, simple_state, measure_state, inputs, Ts)
     
         # --- linearize model ---
-        Hp, Hc = 40, 1
+        Hp, Hc = 20, 1
         linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, nmx, nu,
             string.(simple_state), string.(inputs),
             x0, u0, Ts, Hp)
@@ -130,12 +130,12 @@ mutable struct ControlInterface
         )
     
         Mwt = fill(0.0, linmodel.ny)
-        Mwt[s_idxs[sys.heading_y]] = 1.0
+        Mwt[s_idxs[sys.heading_y]] = 10.0
         # Mwt[s_idxs[sys.tether_length[1])] = 0.1
         # Mwt[s_idxs[sys.tether_length[2])] = 0.1
-        Mwt[s_idxs[sys.tether_length[3]]] = 1.0
+        Mwt[s_idxs[sys.tether_length[3]]] = 0.1
         Nwt = fill(0.0, linmodel.nu)
-        Lwt = fill(0.1, linmodel.nu)
+        Lwt = fill(0.5, linmodel.nu)
     
         σR = fill(1e-4, linmodel.ny)
         σQ = fill(1e2, linmodel.nx)
@@ -146,13 +146,14 @@ mutable struct ControlInterface
         optim = JuMP.Model(HiGHS.Optimizer)
         mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
     
-        umin, umax = [-10, -10, -10], [10, 10, 10] # TODO: torque control with u0 = -winch_forces * drum_radius
+        umin, umax = [-1, -1, -1], [1, 1, 1] # TODO: torque control with u0 = -winch_forces * drum_radius
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)
         ymax = fill(Inf, linmodel.ny)
-        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 1.0
-        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 1.0
+        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 0.1
+        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 0.1
+        ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
         setconstraint!(mpc; umin, umax, ymin, ymax)
         # initstate!(mpc, zeros(3), y0) # TODO: check if needed
     
