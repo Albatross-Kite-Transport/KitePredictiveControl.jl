@@ -5,8 +5,8 @@ if !@isdefined kite_real
     kite_real = KPS4_3L(KCU(se("system_3l.yaml")))
     kite_model = KPS4_3L(KCU(se("system_3l.yaml"))) # TODO: different sim vs real system
 end
-kite_real.set.l_tether = 21.0
-kite_model.set.l_tether = 21.0
+kite_real.set.l_tether = 50.0
+kite_model.set.l_tether = 50.0
 kite_real.set.elevation = 87
 kite_model.set.elevation = 87
 init_set_values = [-0.1, -0.1, -120.0]
@@ -19,7 +19,7 @@ ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=zeros(3), nois
 
 # @assert false
 wanted_heading = deg2rad(5)
-total_time = 20
+total_time = 60
 try
     start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))

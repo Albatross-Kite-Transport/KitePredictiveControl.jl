@@ -135,7 +135,7 @@ mutable struct ControlInterface
         # Mwt[s_idxs[sys.tether_length[2])] = 0.1
         Mwt[s_idxs[sys.tether_length[3]]] = 0.1
         Nwt = fill(0.0, linmodel.nu)
-        Lwt = fill(0.5, linmodel.nu)
+        Lwt = fill(0.1, linmodel.nu)
     
         σR = fill(1e-4, linmodel.ny)
         σQ = fill(1e2, linmodel.nx)
@@ -146,7 +146,7 @@ mutable struct ControlInterface
         optim = JuMP.Model(HiGHS.Optimizer)
         mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
     
-        umin, umax = [-1, -1, -1], [1, 1, 1] # TODO: torque control with u0 = -winch_forces * drum_radius
+        umin, umax = [-10, -10, -1], [10, 10, 1] # TODO: torque control with u0 = -winch_forces * drum_radius
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)
@@ -203,8 +203,7 @@ function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
     linearize!(ci, ci.linmodel, x, u)
-    display(linearization_plot(ci, x, u))
-    @show ci.linmodel.A[1, 2]
+    # display(linearization_plot(ci, x, u))
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
@@ -223,7 +222,7 @@ end
 
 function plot_process(ci::ControlInterface)
     while ci.plotting
-        # display(controlplot(ci))
+        display(controlplot(ci))
     end
 end
 function start_processes!(ci::ControlInterface)
@@ -258,7 +257,7 @@ function linearization_plot(ci::ControlInterface, x0, u0; n::Int=5)
     p = plot()
     idx = 1
     plot!(p, [x_simple_0[idx], x_simple_plus[idx]], label="nonlin")
-    plot!(p, [x_simple_0[idx], lin_plus[idx]], label="lin", ylim=(-0.1, 0.1))
+    plot!(p, [x_simple_0[idx], lin_plus[idx]], label="lin", ylim=(-1.0, 1.0))
     return p
 end
 

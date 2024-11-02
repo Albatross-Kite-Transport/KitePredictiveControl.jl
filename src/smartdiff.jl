@@ -4,22 +4,29 @@ torque control with uop = -winch_force(s)*0.11
 
 1.
 heading_y'   = turn_rate_y = k * flap_diff
+heading_y_plus = heading_y + k * flap_diff * Ts
 
+calculated at instantanious time point after step
     set_value[2] = 5.0
     set_value[1] = -5.0
     next_step!(kite; dt="at least 0.2, doesnt matter that much")
     k = turn_rate / flap_diff
 
 2.
-flap_diff'  = flap_diff_vel = k1 * tether_diff'
-            = k1 * set_value[1] - k1 * set_value[2])
+flap_diff'  = flap_diff_vel = k * tether_diff'
+            = k * set_value[1] - k * set_value[2]
+flap_diff_plus = flap_diff + (k * set_value[1] - k * set_value[2]) * Ts
+
+
     set_value[2] = 5.0
     set_value[1] = -5.0
     next_step!(kite; dt="1/3 of Hp")
-    k1 = tether_diff_vel / (set_value[1] - set_value[2])
+    k = tether_diff_vel / (set_value[1] - set_value[2])
 
 3.
 tether_length' = k * set_value
+tether_length_plus = tether_length + k * set_value * Ts
+
     set_value .= 5.0
     step
     k = tether_vel / set_value
@@ -79,7 +86,7 @@ function linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, n
     Bd = zeros(nsx, 0)
     Dd = zeros(nsx, 0)
 
-    du = 5.0
+    du = 10.0
     U = [
         -du     du      0.0 # left
         du      -du     0.0 # right
@@ -105,13 +112,13 @@ function linearize!(ci::ControlInterface, linmodel::LinModel, x0, u0)
 end
 function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, measurements, x0, u0, Ts, Hp)
     (X_plus, X, U) = measurements
-    A, B, C, D = linmodel.A, linmodel.Bu, linmodel.C, linmodel.Dd
+    A, B, C, D = copy(linmodel.A), copy(linmodel.Bu), linmodel.C, linmodel.Dd
     A .= 0.0
     B .= 0.0
 
     for i in eachindex(U[:, 1])
         x_plus = @view X_plus[i, :]
-        measure_f!(x_plus, x0, u0 .+ U[i, :], 0.5) # *Hp/3
+        measure_f!(x_plus, x0, U[i, :], Ts*Hp/3) # *Hp/3
     end
 
     # --- heading ---
@@ -119,24 +126,24 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
         1 : 2
     A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]] =
             X_plus[i, m_idxs[sys.turn_rate_y]] / X_plus[i, m_idxs[sys.flap_diff]]
+    @show A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]] X_plus[i, m_idxs[sys.turn_rate_y]] X_plus[i, m_idxs[sys.flap_diff]]
 
     # --- flap angle difference ---
-    i = (X_plus[1, m_idxs[sys.tether_diff_vel]]) > (X_plus[2, m_idxs[sys.tether_diff_vel]]) ?
-        1 : 2
-    k = X_plus[i[1], m_idxs[sys.tether_diff_vel]] / ((U[i, 1] + u0[1]) - (U[i, 2] + u0[2]))
+    k = X_plus[1, m_idxs[sys.tether_diff_vel]] / ((U[1, 1]) - (U[1, 2]))
     B[s_idxs[sys.flap_diff], [1, 2]] .= [-k, k]
 
     # --- tether velocity ---
     for i in 1:3
         B[s_idxs[sys.tether_length[i]], i] =
-            X_plus[3, m_idxs[sys.tether_vel[i]]] / (U[3, i] + u0[3])
+            X_plus[3, m_idxs[sys.tether_vel[i]]] / (U[3, i])
     end
 
+    @assert all(isfinite.([A B]))
     
     css = ss(A, B, C, 0)
     dss = c2d(css, Ts, :zoh)
-    linmodel.A .= dss.A
-    linmodel.Bu .= dss.B
+    linmodel.A .= linmodel.A .* 0.95 .+ dss.A .* 0.05
+    linmodel.Bu .= linmodel.Bu .* 0.95 .+ dss.B .* 0.05
     
     linmodel.uop .= u0
     simple_h!(linmodel.yop, x0) # outputs = states
