@@ -203,7 +203,7 @@ function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
     u = moveinput!(ci.mpc, ry)
     linearize!(ci, ci.linmodel, x, u)
-    # display(linearization_plot(ci, x, u))
+    display(linearization_plot(ci, x, u))
     @show ci.linmodel.A[1, 2]
     setmodel!(ci.mpc, ci.linmodel)
     pop_append!(ci.U_data, u)
@@ -223,7 +223,7 @@ end
 
 function plot_process(ci::ControlInterface)
     while ci.plotting
-        display(controlplot(ci))
+        # display(controlplot(ci))
     end
 end
 function start_processes!(ci::ControlInterface)
@@ -243,7 +243,7 @@ end
 """
 Plot the linearization projected n timesteps into the future
 """
-function linearization_plot(ci::ControlInterface, x0, u0; n::Int=10)
+function linearization_plot(ci::ControlInterface, x0, u0; n::Int=5)
     linmodel = deepcopy(ci.linmodel)
     u = u0 .+ [0.0, 1.0, 0.0]
     x_simple_0 = copy(linmodel.xop)
@@ -258,7 +258,7 @@ function linearization_plot(ci::ControlInterface, x0, u0; n::Int=10)
     p = plot()
     idx = 1
     plot!(p, [x_simple_0[idx], x_simple_plus[idx]], label="nonlin")
-    plot!(p, [x_simple_0[idx], lin_plus[idx]], label="lin", ylim=(-0.01, 0.01))
+    plot!(p, [x_simple_0[idx], lin_plus[idx]], label="lin", ylim=(-0.1, 0.1))
     return p
 end
 
