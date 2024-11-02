@@ -13,10 +13,10 @@ using SymbolicIndexingInterface: getu, setp
 import Symbolics: Num
 
 export ControlInterface
-export step!, reset!, controlplot, start_processes!, stop_processes!
+export step!, controlplot, start_processes!, stop_processes!
 
 set_data_path(joinpath(@__DIR__, "..", "data"))
-@with_kw mutable struct ControlInterface
+struct ControlInterface
     "symbolic inputs"
     inputs::Vector{Num}
     "symbolic outputs"
@@ -34,185 +34,154 @@ set_data_path(joinpath(@__DIR__, "..", "data"))
     "nonlinear KiteModels.jl model"
     kite::KiteModels.KPS4_3L
     "complex x0 to simple x_plus nonlinear function"
-    f!::Function
+    measure_f!::Function
+    simple_f!::Function
     "observer function"
-    h!::Function
+    simple_h!::Function
     "linearized model of the kite"
     linmodel::ModelPredictiveControl.LinModel
+    "measurement matrixes X_plus, X and U"
+    measurements::Vector{Matrix{Float64}}
     mpc::ModelPredictiveControl.LinMPC
     optim::JuMP.Model
-    AB::Matrix{Float64}
-    AB_pattern::Matrix{Float64}
     U_data::Matrix{Float64}
     Y_data::Matrix{Float64}
     Ry_data::Matrix{Float64}
     X̂_data::Matrix{Float64}
     output_idxs::Vector{Int}
     observed_idxs::Vector{Int}
+    s_idxs::Dict{Num, Int}
+    m_idxs::Dict{Num, Int}
     y_noise::Vector{Float64}
-    error::Float64 = 0.0
-    "how many time steps to look into the future when linearizing"
-    time_multiplier::Int = 40
-    plotting::Bool = true
-    # linearized_channel::Channel{ModelPredictiveControl.LinMPC} = Channel{ModelPredictiveControl.LinMPC}(1)
-    # stepped_channel::Channel{Tuple{ModelPredictiveControl.LinMPC,
-    #     ModelPredictiveControl.LinModel,
-    #     Vector{Float64},Vector{Float64}}} =
-    #     Channel{Tuple{ModelPredictiveControl.LinMPC,
-    #         ModelPredictiveControl.LinModel,
-    #         Vector{Float64},Vector{Float64}}}(1)
+    error::Float64
+    plotting::Bool
+
+    function ControlInterface(
+        kite::KPS4_3L;
+        Ts::Float64=0.05,
+        x0::Vector{Float64}=kite.integrator.u,
+        u0::Vector{Float64}=zeros(3),
+        ry::Union{Nothing,Vector{Float64}}=nothing,
+        noise::Float64=1e-3,
+        buffer_time::Int=20,
+        time_multiplier::Int=10,
+    )
+        x0 = copy(x0)
+        # --- get symbolic inputs and outputs ---
+        sys = kite.prob.f.sys
+        inputs = [sys.set_values[i] for i in 1:3]
+        measure_state = vcat(
+            sys.heading_y,
+            sys.turn_rate_y,
+            sys.flap_diff,
+            sys.flap_diff_vel,
+            sys.tether_diff,
+            sys.tether_diff_vel,
+            vcat(sys.tether_length),
+            vcat(sys.tether_vel)
+        )
+        simple_state = vcat(
+            sys.heading_y,
+            sys.flap_diff,
+            sys.tether_diff,
+            vcat(sys.tether_length),
+        )
+    
+        s_idxs = Dict{Num, Int}()
+        for (s_idx, sym) in enumerate(simple_state)
+            s_idxs[sym] = s_idx
+        end
+        m_idxs = Dict{Num, Int}()
+        for (m_idx, sym) in enumerate(measure_state)
+            m_idxs[sym] = m_idx
+        end
+    
+        # --- generate f and h functions for linearization ---
+        (simple_f!, measure_f!, simple_h!, simple_state, nu, nsx, nmx) = generate_f_h(kite, simple_state, measure_state, inputs, Ts)
+    
+        # --- linearize model ---
+        Hp, Hc = 40, 1
+        x_simple_0 = zeros(nsx)
+        linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, nsx, nmx, nu,
+            string.(simple_state), string.(inputs),
+            x0, x_simple_0, u0, Ts, Hp)
+    
+        # --- initialize outputs and plotting indexes ---
+        if isnothing(ry)
+            y0 = zeros(nsx)
+            simple_h!(y0, x0)
+            ry = y0
+            ry[s_idxs[sys.heading_y]] = deg2rad(0.0)
+        end
+        output_idxs = vcat(
+            s_idxs[sys.heading_y],
+            s_idxs[sys.flap_diff],
+            s_idxs[sys.tether_length[1]],
+            s_idxs[sys.tether_length[2]],
+            s_idxs[sys.tether_length[3]],
+        )
+        observed_idxs = vcat(
+            # s_idxs[sys.pos[2, kite.num_A]],
+            s_idxs[sys.heading_y],
+            s_idxs[sys.flap_diff],
+            s_idxs[sys.tether_length[1]],
+            s_idxs[sys.tether_length[2]],
+            s_idxs[sys.tether_length[3]],
+            # linmodel.nx + linmodel.ny
+        )
+    
+        Mwt = fill(0.0, linmodel.ny)
+        Mwt[s_idxs[sys.heading_y]] = 1.0
+        # Mwt[s_idxs[sys.tether_length[1])] = 0.1
+        # Mwt[s_idxs[sys.tether_length[2])] = 0.1
+        Mwt[s_idxs[sys.tether_length[3]]] = 1.0
+        Nwt = fill(0.0, linmodel.nu)
+        Lwt = fill(0.1, linmodel.nu)
+    
+        σR = fill(1e-4, linmodel.ny)
+        σQ = fill(1e2, linmodel.nx)
+        σQint_u = fill(1, linmodel.nu)
+        nint_u = fill(1, linmodel.nu)
+        estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
+    
+        optim = JuMP.Model(HiGHS.Optimizer)
+        mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
+    
+        umin, umax = [-5, -5, -20], [5, 5, 20] # TODO: torque control with u0 = -winch_forces * drum_radius
+        # max = 0.5
+        # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
+        ymin = fill(-Inf, linmodel.ny)
+        ymax = fill(Inf, linmodel.ny)
+        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 1.0
+        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 1.0
+        setconstraint!(mpc; umin, umax, ymin, ymax)
+        # initstate!(mpc, zeros(3), y0) # TODO: check if needed
+    
+        # --- init data ---
+        N = Int(round(buffer_time / Ts)) # buffer time is the amount of time to save
+        U_data = fill(NaN, linmodel.nu, N)
+        Y_data = fill(NaN, linmodel.ny, N)
+        Ry_data = fill(NaN, linmodel.ny, N)
+        X̂_data = fill(NaN, estim.nx̂, N)
+        y_noise = fill(noise, linmodel.ny)
+        error = 0.0
+        plotting = true
+        
+        return new(
+            inputs, outputs, u0, x0, x_simple_0, ry, Ts, 
+            kite, measure_f!, simple_f!, simple_h!, linmodel, measurements, 
+            mpc, optim, U_data, Y_data, Ry_data, X̂_data, 
+            output_idxs, observed_idxs, s_idxs, m_idxs,
+            y_noise, error, plotting
+        )
+    end
 end
 
 
-function ControlInterface(
-    kite::KPS4_3L;
-    Ts::Float64=0.05,
-    x0::Vector{Float64}=kite.integrator.u,
-    u0::Vector{Float64}=zeros(3),
-    ry::Union{Nothing,Vector{Float64}}=nothing,
-    noise::Float64=1e-3,
-    buffer_time::Int=20,
-    time_multiplier::Int=10,
-)
-    x0 = copy(x0)
-    # --- get symbolic inputs and outputs ---
-    sys = kite.prob.f.sys
-    inputs = [sys.set_values[i] for i in 1:3]
-    outputs = vcat(
-        sys.heading_y,
-        sys.turn_rate_y,
-        sys.depower,
-        sys.depower_vel,
-        vcat(sys.tether_length),
-        vcat(sys.tether_vel),
-    )
 
-    # --- generate ForwardDiff and MPC compatible f and h functions for linearization ---
-    f!, h!, simple_state, nu, nx, nsx = generate_f_h(kite, inputs, outputs, QNDF(), Ts)
-    # nonlinmodel = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
-    # setname!(nonlinmodel, x=string.(states), u=string.(inputs), y=string.(outputs))
-
-    linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, x_simple_0, ry, AB, AB_pattern =
-        reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
-
-    ci = ControlInterface(
-        inputs=inputs,
-        outputs=outputs,
-        x0=x0,
-        x_simple_0=x_simple_0,
-        u0=u0,
-        linmodel=linmodel,
-        kite=kite,
-        (f!)=f!,
-        (h!)=h!,
-        mpc=mpc,
-        optim=optim,
-        Ts=Ts,
-        U_data=U_data,
-        Y_data=Y_data,
-        Ry_data=Ry_data,
-        X̂_data=X̂_data,
-        ry=ry,
-        output_idxs=output_idxs,
-        observed_idxs=observed_idxs,
-        y_noise=y_noise,
-        AB=AB,
-        AB_pattern=AB_pattern,
-        time_multiplier=time_multiplier
-    )
-    return ci
-end
 
 include("mtk_interface.jl")
 include("smartdiff.jl")
-
-function reset!(ci::ControlInterface;
-    x0::Vector{Float64}=ci.x0,
-    u0::Vector{Float64}=ci.u0,
-    ry::Union{Nothing,Vector{Float64}}=nothing,
-    noise::Float64=1e-3,
-    buffer_time::Int=20
-)
-    ci.linmodel, ci.mpc, ci.output_idxs, ci.observed_idxs, ci.optim, ci.U_data, ci.Y_data, ci.Ry_data, ci.X̂_data, ci.y_noise, ci.ry =
-        reset!(ci.kite.prob.f.sys, x0, u0, ci.linmodel.ny, ci.Ts, ry, noise, buffer_time)
-    return nothing
-end
-function reset!(sys, simple_state, inputs, time_multiplier, x0, u0, nsx, nu, Ts, ry, noise, buffer_time, f!, h!)
-    # function yidx(name::Vector{String}, var)
-    #     return findfirst(x -> x == string(var), name)
-    # end
-    yidx = var -> findfirst(x -> x == string(var), linmodel.yname)
-    xidx = var -> findfirst(x -> x == string(var), linmodel.xname)
-
-    # --- linearize model ---
-    x_simple_0 = zeros(nsx)
-    linmodel, AB, AB_pattern = linearize(sys, f!, h!, nsx, nu,
-        string.(simple_state), string.(inputs),
-        x0, x_simple_0, u0, Ts; time_multiplier)
-
-    # --- initialize outputs and plotting indexes ---
-    if isnothing(ry)
-        y0 = zeros(nsx)
-        h!(y0, x0)
-        ry = y0
-        ry[yidx(sys.heading_y)] = deg2rad(0.0)
-        ry[yidx(sys.depower)] = 0.45
-    end
-    output_idxs = vcat(
-        yidx(sys.heading_y),
-        yidx(sys.depower),
-        # yidx(sys.tether_length[1]),
-        # yidx(sys.tether_length[2]),
-        yidx(sys.tether_length[3]),
-    )
-    observed_idxs = vcat(
-        # xidx(sys.pos[2, kite.num_A]),
-        xidx(sys.tether_length[1]),
-        xidx(sys.tether_length[2]),
-        xidx(sys.tether_length[3]),
-        xidx(sys.depower),
-        xidx(sys.heading_y),
-        # linmodel.nx + linmodel.ny
-    )
-
-    Mwt = fill(0.0, linmodel.ny)
-    Mwt[yidx(sys.heading_y)] = 10.0
-    Mwt[yidx(sys.depower)] = 1.0
-    # Mwt[yidx(sys.tether_length[1])] = 0.1
-    # Mwt[yidx(sys.tether_length[2])] = 0.1
-    Mwt[yidx(sys.tether_length[3])] = 0.1
-    Nwt = fill(0.0, linmodel.nu)
-    Lwt = fill(0.1, linmodel.nu)
-
-    σR = fill(1e-4, linmodel.ny)
-    σQ = fill(1e2, linmodel.nx)
-    σQint_u = fill(1, linmodel.nu)
-    nint_u = fill(1, linmodel.nu)
-    estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
-
-    Hp, Hc = 40, 1
-    optim = JuMP.Model(HiGHS.Optimizer)
-    mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
-
-    umin, umax = [-20, -20, -500], [0.0, 0.0, 0.0] # TODO: torque control with u0 = -winch_forces * drum_radius
-    # max = 0.5
-    # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
-    ymin = fill(-Inf, linmodel.ny)
-    ymax = fill(Inf, linmodel.ny)
-    ymax[yidx(sys.depower)] = 0.6
-    setconstraint!(mpc; umin, umax, ymin, ymax)
-    # initstate!(mpc, zeros(3), y0) # TODO: check if needed
-
-    # --- init data ---
-    N = Int(round(buffer_time / Ts)) # buffer time is the amount of time to save
-    U_data = fill(NaN, linmodel.nu, N)
-    Y_data = fill(NaN, linmodel.ny, N)
-    Ry_data = fill(NaN, linmodel.ny, N)
-    X̂_data = fill(NaN, estim.nx̂, N)
-    y_noise = fill(noise, linmodel.ny)
-    return linmodel, mpc, output_idxs, observed_idxs, optim, U_data, Y_data, Ry_data, X̂_data, y_noise, x_simple_0, ry, AB, AB_pattern
-end
-
 
 function lin_ulin_sim(ci::ControlInterface)
     println("linear sanity check")
