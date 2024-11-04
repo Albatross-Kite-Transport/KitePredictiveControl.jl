@@ -21,7 +21,7 @@ ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=zeros(3), nois
 
 # @assert false
 wanted_heading = deg2rad(1)
-total_time = 40
+total_time = 100
 try
     start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))

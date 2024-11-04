@@ -63,7 +63,7 @@ mutable struct ControlInterface
         u0::Vector{Float64}=zeros(3),
         ry::Union{Nothing,Vector{Float64}}=nothing,
         noise::Float64=1e-3,
-        buffer_time::Int=20,
+        buffer_time::Int=100,
         time_multiplier::Int=10,
     )
         x0 = copy(x0)
@@ -154,6 +154,8 @@ mutable struct ControlInterface
         ymax = fill(Inf, linmodel.ny)
         ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 0.1
         ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 0.1
+        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 1.0
+        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 1.0
         ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
         setconstraint!(mpc; umin, umax, ymin, ymax)
         # initstate!(mpc, zeros(3), y0) # TODO: check if needed

@@ -86,7 +86,7 @@ function linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, n
     Bd = zeros(nsx, 0)
     Dd = zeros(nsx, 0)
 
-    du = 3.0
+    du = 10.0
     U = [
         -du     du      0.0 # left
         du      -du     0.0 # right
@@ -118,7 +118,7 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
 
     for i in eachindex(U[:, 1])
         x_plus = @view X_plus[i, :]
-        measure_f!(x_plus, x0, u0 .+ U[i, :], Ts*Hp*0.1) # *Hp/3
+        measure_f!(x_plus, x0, u0 .+ U[i, :], 0.3) # *Hp/3
     end
 
     # --- heading ---
