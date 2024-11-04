@@ -73,16 +73,17 @@ mutable struct ControlInterface
         measure_state = vcat(
             sys.heading_y,
             sys.turn_rate_y,
-            sys.flap_diff,
-            sys.flap_diff_vel,
-            sys.tether_diff,
-            sys.tether_diff_vel,
+            sys.steering_angle,
+            sys.steering_vel,
+            sys.power_angle,
+            sys.power_vel,
             vcat(sys.tether_length),
             vcat(sys.tether_vel)
         )
         simple_state = vcat(
             sys.heading_y,
-            sys.flap_diff,
+            sys.steering_angle,
+            sys.power_angle,
             vcat(sys.tether_length),
         )
         outputs = simple_state
@@ -111,29 +112,29 @@ mutable struct ControlInterface
             simple_h!(y0, x0)
             ry = y0
             ry[s_idxs[sys.heading_y]] = deg2rad(0.0)
+            ry[s_idxs[sys.power_angle]] += 0.3
         end
         output_idxs = vcat(
             s_idxs[sys.heading_y],
-            s_idxs[sys.flap_diff],
+            s_idxs[sys.steering_angle],
+            s_idxs[sys.power_angle],
             s_idxs[sys.tether_length[1]],
-            s_idxs[sys.tether_length[2]],
             s_idxs[sys.tether_length[3]],
         )
         observed_idxs = vcat(
             # s_idxs[sys.pos[2, kite.num_A]],
             s_idxs[sys.heading_y],
-            s_idxs[sys.flap_diff],
+            s_idxs[sys.steering_angle],
+            s_idxs[sys.power_angle],
             s_idxs[sys.tether_length[1]],
-            s_idxs[sys.tether_length[2]],
             s_idxs[sys.tether_length[3]],
             # linmodel.nx + linmodel.ny
         )
     
         Mwt = fill(0.0, linmodel.ny)
-        Mwt[s_idxs[sys.heading_y]] = 100.0
-        # Mwt[s_idxs[sys.tether_length[1])] = 0.1
-        # Mwt[s_idxs[sys.tether_length[2])] = 0.1
-        Mwt[s_idxs[sys.tether_length[3]]] = 0.1
+        Mwt[s_idxs[sys.heading_y]] = 1e2
+        Mwt[s_idxs[sys.power_angle]] = 0.0 # TODO: slow integrator control on power angle and tether length
+        Mwt[s_idxs[sys.tether_length[3]]] = 1e-2
         Nwt = fill(0.0, linmodel.nu)
         Lwt = fill(0.1, linmodel.nu)
     
@@ -147,18 +148,17 @@ mutable struct ControlInterface
         mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
     
         du = 20.0
-        umin, umax = [-du, -du, -du], [du, du, du] # TODO: torque control with u0 = -winch_forces * drum_radius
+        umin, umax = [-du, -du, -du], [du, du, du]
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)
         ymax = fill(Inf, linmodel.ny)
-        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 0.1
-        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 0.1
-        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 1.0
-        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 1.0
-        ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
+        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 2.0
+        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 2.0
+        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 0.1
+        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 0.1
+        # ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
         setconstraint!(mpc; umin, umax, ymin, ymax)
-        # initstate!(mpc, zeros(3), y0) # TODO: check if needed
     
         # --- init data ---
         N = Int(round(buffer_time / Ts)) # buffer time is the amount of time to save

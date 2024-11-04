@@ -1,10 +1,10 @@
 using Revise, KiteModels, LinearAlgebra, Statistics, KitePredictiveControl
 using ControlPlots
 
-set = deepcopy(load_settings("system_3l.yaml"))
+set = deepcopy(load_settings("system_model.yaml"))
 # set.elevation = 71
 dt = 0.01
-total_time = 2.0
+total_time = 10.0
 
 steps = Int(round(total_time / dt))
 logger = Logger(3*set.segments + 6, steps)
@@ -39,13 +39,13 @@ for i in 1:steps
     # if time > 5.0 steering = [-10, -1, -200.0] end
     if time <= 1.0
         steering[2] = -3.0 
-        steering[1] = 3.0 
-        steering[3] = -0.0 
+        steering[1] = -3.0 
+        steering[3] = 3.0 
     end
     if time > 1.0
-        steering[2] = 3.0 
+        steering[2] = -3.0 
         steering[1] = -3.0 
-        steering[3] = -0.0 
+        steering[3] = 3.0 
     end
 
     # if time < 1.0
@@ -58,7 +58,7 @@ for i in 1:steps
 
     sys_state.var_01 =  rad2deg(s.get_flap_angle(s.integrator)[1])
     sys_state.var_02 =  rad2deg(s.get_flap_angle(s.integrator)[2])
-    sys_state.var_03 =  rad2deg(s.integrator[s.simple_sys.depower])
+    sys_state.var_03 =  rad2deg(s.integrator[s.simple_sys.power_angle])
     sys_state.var_04 =  s.tether_lengths[1]
     sys_state.var_05 =  s.tether_lengths[2]
     sys_state.var_06 =  lin_state[1]
@@ -68,7 +68,8 @@ for i in 1:steps
     sys_state.var_10 =  (s.integrator[s.simple_sys.flap_angle][2] - s.integrator[s.simple_sys.flap_angle][1])
     sys_state.var_11 =  clamp((s.integrator[s.simple_sys.flap_vel][1] - s.integrator[s.simple_sys.flap_vel][2]) /
                             (steering[2] - steering[1]) * 1000, -10, 10)
-    sys_state.var_12 =  lin_state[2]
+    sys_state.var_12 =  lin_state[ci.s_idxs[s.simple_sys.steering_angle]]
+    sys_state.var_13 =  rad2deg(lin_state[ci.s_idxs[s.simple_sys.power_angle]])
 
     @show sys_state.var_08
 
@@ -89,17 +90,17 @@ println("times realtime MTK model: ", times_reltime)
 # println("avg steptime MTK model:   ", total_step_time/steps)
 
 p=plotx(logger.time_vec, 
-            [logger.var_01_vec,  logger.var_02_vec, logger.var_03_vec], 
+            [logger.var_01_vec,  logger.var_02_vec, logger.var_03_vec, logger.var_13_vec], 
             [logger.var_04_vec,  logger.var_05_vec], 
             [rad2deg.(logger.var_07_vec), rad2deg.(logger.var_08_vec), rad2deg.(logger.var_06_vec)], 
             [logger.var_09_vec, logger.var_11_vec],
             [logger.var_10_vec, logger.var_12_vec]; 
-        ylabels=["steering", "length", "heading [deg]", "ratio", "distance"], 
+        ylabels=["steering", "length", "heading [deg]", "ratio", "distance", "angle"], 
         labels=[
-            ["steering pos C", "steering pos D", "power angle"], 
+            ["steering pos C", "steering pos D", "power angle", "lin power angle"], 
             ["left tether", "right tether"], 
             ["turn_rate_y", "heading_y", "lin heading"],
-            ["turn_rate / flap difference", "flap_diff' / steering_diff"],
-            ["flap difference", "lin flap diff"]],
+            ["turn_rate / steering angle", "flap_diff' / steering_diff"],
+            ["steering angle", "lin steering angle"]],
         fig="Steering and heading MTK model")
 display(p)
