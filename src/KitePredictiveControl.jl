@@ -100,7 +100,7 @@ mutable struct ControlInterface
         (simple_f!, measure_f!, simple_h!, simple_state, nu, nsx, nmx) = generate_f_h(kite, simple_state, measure_state, inputs, Ts)
     
         # --- linearize model ---
-        Hp, Hc = 20, 1
+        Hp, Hc = 20, 5
         linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, nmx, nu,
             string.(simple_state), string.(inputs),
             x0, u0, Ts, Hp)
@@ -130,7 +130,7 @@ mutable struct ControlInterface
         )
     
         Mwt = fill(0.0, linmodel.ny)
-        Mwt[s_idxs[sys.heading_y]] = 10.0
+        Mwt[s_idxs[sys.heading_y]] = 100.0
         # Mwt[s_idxs[sys.tether_length[1])] = 0.1
         # Mwt[s_idxs[sys.tether_length[2])] = 0.1
         Mwt[s_idxs[sys.tether_length[3]]] = 0.1
@@ -146,7 +146,8 @@ mutable struct ControlInterface
         optim = JuMP.Model(HiGHS.Optimizer)
         mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
     
-        umin, umax = [-10, -10, -1], [10, 10, 1] # TODO: torque control with u0 = -winch_forces * drum_radius
+        du = 20.0
+        umin, umax = [-du, -du, -du], [du, du, du] # TODO: torque control with u0 = -winch_forces * drum_radius
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)

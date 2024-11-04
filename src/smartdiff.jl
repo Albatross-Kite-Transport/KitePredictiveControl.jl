@@ -86,7 +86,7 @@ function linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, n
     Bd = zeros(nsx, 0)
     Dd = zeros(nsx, 0)
 
-    du = 10.0
+    du = 3.0
     U = [
         -du     du      0.0 # left
         du      -du     0.0 # right
@@ -118,7 +118,7 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
 
     for i in eachindex(U[:, 1])
         x_plus = @view X_plus[i, :]
-        measure_f!(x_plus, x0, U[i, :], Ts*Hp/3) # *Hp/3
+        measure_f!(x_plus, x0, u0 .+ U[i, :], Ts*Hp*0.1) # *Hp/3
     end
 
     # --- heading ---
@@ -126,24 +126,24 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
         1 : 2
     A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]] =
             X_plus[i, m_idxs[sys.turn_rate_y]] / X_plus[i, m_idxs[sys.flap_diff]]
-    @show A[s_idxs[sys.heading_y], s_idxs[sys.flap_diff]] X_plus[i, m_idxs[sys.turn_rate_y]] X_plus[i, m_idxs[sys.flap_diff]]
 
     # --- flap angle difference ---
-    k = X_plus[1, m_idxs[sys.tether_diff_vel]] / ((U[1, 1]) - (U[1, 2]))
-    B[s_idxs[sys.flap_diff], [1, 2]] .= [-k, k]
+    k = X_plus[1, m_idxs[sys.flap_diff_vel]] / ((U[1, 1] + u0[1]) - (U[1, 2] + u0[2]))
+    B[s_idxs[sys.flap_diff], [1, 2]] .= [k, -k]
+    @show X_plus[1, m_idxs[sys.tether_diff_vel]]
 
     # --- tether velocity ---
     for i in 1:3
         B[s_idxs[sys.tether_length[i]], i] =
-            X_plus[3, m_idxs[sys.tether_vel[i]]] / (U[3, i])
+            X_plus[3, m_idxs[sys.tether_vel[i]]] / (U[3, i] + u0[3])
     end
 
     @assert all(isfinite.([A B]))
     
     css = ss(A, B, C, 0)
     dss = c2d(css, Ts, :zoh)
-    linmodel.A .= linmodel.A .* 0.95 .+ dss.A .* 0.05
-    linmodel.Bu .= linmodel.Bu .* 0.95 .+ dss.B .* 0.05
+    linmodel.A .= dss.A
+    linmodel.Bu .= dss.B
     
     linmodel.uop .= u0
     simple_h!(linmodel.yop, x0) # outputs = states
