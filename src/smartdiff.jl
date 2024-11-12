@@ -123,7 +123,7 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
     for i in eachindex(U[:, 1])
         U[i, :] .+= u0
         x_plus = @view X_plus[i, :]
-        measure_f!(x_plus, x0, U[i, :], 0.3) # *Hp/3
+        measure_f!(x_plus, x0, U[i, :], 0.05) # *Hp/3
     end
 
     # --- heading ---
@@ -133,11 +133,13 @@ function linearize!(linmodel::LinModel, sys, s_idxs, m_idxs, measure_f!, simple_
             X_plus[i, m_idxs[sys.turn_rate_y]] / X_plus[i, m_idxs[sys.steering_angle]]
 
     # --- steering angle ---
-    k = X_plus[1, m_idxs[sys.steering_vel]] / (U[1, 1] - U[1, 2])
+    # i = abs(X_plus[1, m_idxs[sys.steering_vel]]) > abs(X_plus[2, m_idxs[sys.steering_vel]]) ?
+    #     1 : 2
+    k = X_plus[i, m_idxs[sys.steering_vel]] / (U[i, 1] - U[i, 2])
     B[s_idxs[sys.steering_angle], [1, 2]] .= [k, -k]
 
     # --- power angle ---
-    k = (X_plus[1, m_idxs[sys.power_vel]] - linmodel.yop[s_idxs[sys.power_angle]]) / 0.3 / (0.5U[4, 1] + 0.5U[4, 2] - U[4, 3])
+    k = (X_plus[4, m_idxs[sys.power_vel]] - linmodel.yop[s_idxs[sys.power_angle]]) / 0.3 / (0.5U[4, 1] + 0.5U[4, 2] - U[4, 3])
     B[s_idxs[sys.power_angle], :] .= [0.5k, 0.5k, -k]
 
     # --- tether velocity ---

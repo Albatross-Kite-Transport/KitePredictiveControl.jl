@@ -136,7 +136,7 @@ mutable struct ControlInterface
         Mwt[s_idxs[sys.power_angle]] = 0.0 # TODO: slow integrator control on power angle and tether length
         Mwt[s_idxs[sys.tether_length[3]]] = 1e-2
         Nwt = fill(0.0, linmodel.nu)
-        Lwt = fill(0.1, linmodel.nu)
+        Lwt = fill(0.5, linmodel.nu)
     
         σR = fill(1e-4, linmodel.ny)
         σQ = fill(1e2, linmodel.nx)
@@ -155,13 +155,13 @@ mutable struct ControlInterface
         ymax = fill(Inf, linmodel.ny)
         ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 2.0
         ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 2.0
-        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 0.1
-        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 0.1
+        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 1.0 # important: not too big!
+        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 1.0
         # ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
         setconstraint!(mpc; umin, umax, ymin, ymax)
     
         # --- init data ---
-        N = Int(round(buffer_time / Ts)) # buffer time is the amount of time to save
+        N = Int(round(buffer_time / Ts)) # buffer time is the amount of time TO save
         U_data = fill(NaN, linmodel.nu, N)
         Y_data = fill(NaN, linmodel.ny, N)
         Ry_data = fill(NaN, linmodel.ny, N)
