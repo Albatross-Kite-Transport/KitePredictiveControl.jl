@@ -1,4 +1,5 @@
 To test:
-```julia
-julia> include("src/KitePredictiveControl.jl")
+```
+julia --project=.
+julia> include("examples/simple.jl")
 ```

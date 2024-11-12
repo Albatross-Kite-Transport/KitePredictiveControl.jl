@@ -18,22 +18,22 @@ init_sim!(kite_model; prn=true, torque_control=true, init_set_values, ϵ=1e-3, f
 ci = KitePredictiveControl.ControlInterface(kite_model; Ts=Ts, u0=zeros(3), noise=0.0)
 
 # init_sim!(kite_real; prn=true, torque_control=true, init_set_values=[-10, -10, -70])
-last_wanted_heading = deg2rad(10.0)
+last_wanted_heading = deg2rad(30.0)
 
 function wanted_heading(t, pos_y, last_wanted_heading)
     wanted_heading = last_wanted_heading
     if last_wanted_heading > 0 && pos_y < -10
-        wanted_heading = -last_wanted_heading - deg2rad(1)
+        wanted_heading = -last_wanted_heading - deg2rad(0)
         last_wanted_heading = wanted_heading
     elseif last_wanted_heading < 0 && pos_y > 10
-        wanted_heading = -last_wanted_heading + deg2rad(1)
+        wanted_heading = -last_wanted_heading + deg2rad(0)
         last_wanted_heading = wanted_heading
     end
     @show rad2deg(wanted_heading)
     return wanted_heading, last_wanted_heading
 end
 
-total_time = 200
+total_time = 60
 try
     start_processes!(ci)
     for i in 1:Int(div(total_time, Ts))
@@ -50,6 +50,7 @@ try
         # if (kite_real.pos[kite_real.num_A][2] > 3.0) wanted_heading = deg2rad(1.0) end
 
         rheading, last_wanted_heading = wanted_heading(t, pos_y, last_wanted_heading)
+        # rheading = deg2rad(-90)
         set_values = KitePredictiveControl.step!(ci, kite_real.integrator.u, y; rheading)
         real = @elapsed next_step!(kite_real; set_values = set_values .- winch_force(kite_real) * kite_real.set.drum_radius, dt = Ts)
         pause_t = Ts - (time() - start_t)
@@ -57,7 +58,7 @@ try
         if (pause_t + real < 0) println("pause_t = ", pause_t)
         elseif (pause_t > 0) sleep(pause_t) end
         l = kite_real.set.l_tether+10
-        # plot2d(kite_real.pos, (i-1)*Ts; zoom=true, front=true, xlim=(-l/2, l/2), ylim=(0, l))
+        # plot2d(kite_real.pos, (i-1)*Ts; zoom=true, front=true, xlim=(-l, l), ylim=(0, 2l))
     end
 finally
     sleep(2)

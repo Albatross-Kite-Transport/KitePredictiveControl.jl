@@ -5,7 +5,6 @@ using PrecompileTools: @setup_workload, @compile_workload
 using KiteModels, ControlSystems, Serialization, OrdinaryDiffEq,
     LinearAlgebra, Plots, Base.Threads
 using JuMP, HiGHS # solvers
-using Parameters
 using SymbolicIndexingInterface: parameter_values, state_values
 using ModelingToolkit: variable_index as idx, unknowns
 using ModelingToolkit.SciMLBase: successful_retcode
@@ -145,7 +144,7 @@ mutable struct ControlInterface
         estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
     
         optim = JuMP.Model(HiGHS.Optimizer)
-        mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=Inf)
+        mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=1e5)
     
         du = 20.0
         umin, umax = [-du, -du, -du], [du, du, du]
@@ -153,10 +152,10 @@ mutable struct ControlInterface
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
         ymin = fill(-Inf, linmodel.ny)
         ymax = fill(Inf, linmodel.ny)
-        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 2.0
-        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 2.0
-        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] + 1.0 # important: not too big!
-        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] + 1.0
+        ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 3.0
+        ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 3.0
+        ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 1.0 # important: not too big!
+        ymax[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 1.0
         # ymax[s_idxs[sys.tether_length[3]]] = y0[s_idxs[sys.tether_length[3]]] + 0.1
         setconstraint!(mpc; umin, umax, ymin, ymax)
     
