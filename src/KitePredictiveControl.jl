@@ -4,7 +4,7 @@ using ModelPredictiveControl
 using PrecompileTools: @setup_workload, @compile_workload
 using KiteModels
 using ControlSystems, Serialization, OrdinaryDiffEq,
-    LinearAlgebra, Plots, Base.Threads
+    LinearAlgebra, Plots, Base.Threads, PreallocationTools
 using JuMP, HiGHS # solvers
 using SymbolicIndexingInterface: parameter_values, state_values
 using ModelingToolkit: variable_index as idx, unknowns
@@ -17,15 +17,15 @@ export step!, controlplot, start_processes!, stop_processes!
 
 set_data_path(joinpath(@__DIR__, "..", "data"))
 mutable struct ControlInterface
-    "symbolic inputs"
-    inputs::Vector{Num}
-    "symbolic outputs"
-    outputs::Vector{Num}
-    "initial inputs"
+    "symbolic input"
+    input::Vector{Num}
+    "symbolic output"
+    output::Vector{Num}
+    "initial input"
     u0::Vector{Float64}
     "initial state"
     x0::Vector{Float64}
-    "wanted outputs"
+    "wanted output"
     ry::Vector{Float64}
     "sampling time [seconds]"
     Ts::Float64
@@ -34,15 +34,12 @@ mutable struct ControlInterface
     "nonlinear KiteModels.jl model"
     kite::KiteModels.KPS4_3L
     "complex x0 to simple x_plus nonlinear function"
-    measure_f!::Function
-    simple_f!::Function
+    f!::Function
     "observer function"
-    simple_h!::Function
+    h!::Function
     "linearized model of the kite"
-    linmodel::ModelPredictiveControl.LinModel
-    "measurement matrixes X_plus, X and U"
-    measurements::Tuple{Matrix{Float64}, Matrix{Float64}, Matrix{Float64}}
-    mpc::ModelPredictiveControl.LinMPC
+    model::ModelPredictiveControl.NonLinModel
+    mpc::ModelPredictiveControl.NonLinMPC
     optim::JuMP.Model
     U_data::Matrix{Float64}
     Y_data::Matrix{Float64}
@@ -51,7 +48,6 @@ mutable struct ControlInterface
     output_idxs::Vector{Int}
     observed_idxs::Vector{Int}
     s_idxs::Dict{Num, Int}
-    m_idxs::Dict{Num, Int}
     y_noise::Vector{Float64}
     error::Float64
     plotting::Bool
@@ -67,49 +63,30 @@ mutable struct ControlInterface
         time_multiplier::Int=10,
     )
         x0 = copy(x0)
-        # --- get symbolic inputs and outputs ---
+        # --- get symbolic input and output ---
         sys = kite.prob.f.sys
-        inputs = [sys.set_values[i] for i in 1:3]
-        measure_state = vcat(
-            sys.heading_y,
-            sys.turn_rate_y,
-            sys.steering_angle,
-            sys.steering_vel,
-            sys.power_angle,
-            sys.power_vel,
-            vcat(sys.tether_length),
-            vcat(sys.tether_vel)
-        )
-        simple_state = vcat(
-            sys.heading_y,
-            sys.steering_angle,
-            sys.power_angle,
-            vcat(sys.tether_length),
-        )
-        outputs = simple_state
+        input = [sys.set_values[i] for i in 1:3]
+        output = [
+            sys.heading_y
+            sys.steering_angle
+            sys.power_angle
+            collect(sys.tether_length)
+        ]
     
         s_idxs = Dict{Num, Int}()
-        for (s_idx, sym) in enumerate(simple_state)
+        for (s_idx, sym) in enumerate(output)
             s_idxs[sym] = s_idx
-        end
-        m_idxs = Dict{Num, Int}()
-        for (m_idx, sym) in enumerate(measure_state)
-            m_idxs[sym] = m_idx
         end
     
         # --- generate f and h functions for linearization ---
-        (simple_f!, measure_f!, simple_h!, simple_state, nu, nsx, nmx) = generate_f_h(kite, simple_state, measure_state, inputs, Ts)
+        (f!, h!, nx, nu, ny) = generate_f_h(kite, input, output, Ts)
     
-        # --- linearize model ---
         Hp, Hc = 20, 5
-        linmodel, measurements = linearize(sys, s_idxs, m_idxs, measure_f!, simple_f!, simple_h!, nsx, nmx, nu,
-            string.(simple_state), string.(inputs),
-            x0, u0, Ts, Hp)
     
-        # --- initialize outputs and plotting indexes ---
+        # --- initialize output and plotting indexes ---
         if isnothing(ry)
-            y0 = zeros(nsx)
-            simple_h!(y0, x0)
+            y0 = zeros(ny)
+            h!(y0, x0, nothing, nothing)
             ry = y0
             ry[s_idxs[sys.heading_y]] = deg2rad(0.0)
             ry[s_idxs[sys.power_angle]] += 0.3
@@ -131,28 +108,36 @@ mutable struct ControlInterface
             # linmodel.nx + linmodel.ny
         )
     
-        Mwt = fill(0.0, linmodel.ny)
+        
+        model = NonLinModel(f!, h!, Ts, nu, nx, ny, solver=nothing)
+        setstate!(model, x0)
+
+        Mwt = fill(0.0, model.ny)
         Mwt[s_idxs[sys.heading_y]] = 1e2
-        Mwt[s_idxs[sys.power_angle]] = 0.0 # TODO: slow integrator control on power angle and tether length
+        Mwt[s_idxs[sys.power_angle]] = 0.0
         Mwt[s_idxs[sys.tether_length[3]]] = 1e-2
-        Nwt = fill(0.0, linmodel.nu)
-        Lwt = fill(0.5, linmodel.nu)
+        Nwt = fill(0.0, model.nu)
+        Lwt = fill(0.5, model.nu)
+        @show model.nu
     
-        σR = fill(1e-4, linmodel.ny)
-        σQ = fill(1e2, linmodel.nx)
-        σQint_u = fill(1, linmodel.nu)
-        nint_u = fill(1, linmodel.nu)
-        estim = ModelPredictiveControl.UnscentedKalmanFilter(linmodel; nint_u, σQint_u, σQ, σR)
+        σR = fill(1e-4, model.ny)
+        σQ = fill(1e2, model.nx)
+        σQint_u = fill(1, model.nu)
+        nint_u = fill(1, model.nu)
+        estim = ModelPredictiveControl.UnscentedKalmanFilter(model; nint_u, σQint_u, σQ, σR)
     
         optim = JuMP.Model(HiGHS.Optimizer)
-        mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=1e5)
+        mpc = NonLinMPC(estim; Hp, Hc, Mwt, Nwt, Lwt, Cwt=1e5)
+        @show kite.integrator[output]
+        initstate!(mpc, u0, kite.integrator[output])
+        setstate!(mpc, vcat(x0, u0))
     
         du = 20.0
         umin, umax = [-du, -du, -du], [du, du, du]
         # max = 0.5
         # Δumin, Δumax = [-max, -max, -max*10], [max, max, max*10]
-        ymin = fill(-Inf, linmodel.ny)
-        ymax = fill(Inf, linmodel.ny)
+        ymin = fill(-Inf, model.ny)
+        ymax = fill(Inf, model.ny)
         ymin[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 4.8
         ymin[s_idxs[sys.tether_length[2]]] = y0[s_idxs[sys.tether_length[2]]] - 4.8
         ymax[s_idxs[sys.tether_length[1]]] = y0[s_idxs[sys.tether_length[1]]] - 4.5 # important: not too big!
@@ -162,26 +147,23 @@ mutable struct ControlInterface
     
         # --- init data ---
         N = Int(round(buffer_time / Ts)) # buffer time is the amount of time TO save
-        U_data = fill(NaN, linmodel.nu, N)
-        Y_data = fill(NaN, linmodel.ny, N)
-        Ry_data = fill(NaN, linmodel.ny, N)
+        U_data = fill(NaN, model.nu, N)
+        Y_data = fill(NaN, model.ny, N)
+        Ry_data = fill(NaN, model.ny, N)
         X̂_data = fill(NaN, estim.nx̂, N)
-        y_noise = fill(noise, linmodel.ny)
+        y_noise = fill(noise, model.ny)
         error = 0.0
         plotting = true
         
         return new(
-            inputs, outputs, u0, x0, ry, Ts, Hp,
-            kite, measure_f!, simple_f!, simple_h!, linmodel, measurements, 
+            input, output, u0, x0, ry, Ts, Hp,
+            kite, f!, h!, model, 
             mpc, optim, U_data, Y_data, Ry_data, X̂_data, 
-            output_idxs, observed_idxs, s_idxs, m_idxs,
+            output_idxs, observed_idxs, s_idxs,
             y_noise, error, plotting
         )
     end
 end
-
-
-
 
 include("mtk_interface.jl")
 include("smartdiff.jl")
@@ -189,7 +171,7 @@ include("smartdiff.jl")
 function lin_ulin_sim(ci::ControlInterface)
     println("linear sanity check")
     u = [-0, -50, -70]
-    res = sim!(ci.linmodel, 10, u; x0=ci.x0)
+    res = sim!(ci.model, 10, u; x0=ci.x0)
     p1 = plot(res; plotx=false, ploty=ci.output_idxs, plotu=false, size=(900, 900))
     display(p1)
     # println("nonlinear sanity check")
@@ -203,11 +185,10 @@ function step!(ci::ControlInterface, x, y; ry=ci.ry, rheading=nothing)
     if !isnothing(rheading)
         ci.ry[1] = rheading
     end
-    x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.linmodel.ny))
+    x̂ = preparestate!(ci.mpc, y .+ ci.y_noise .* randn(ci.model.ny))
     u = moveinput!(ci.mpc, ry)
-    linearize!(ci, ci.linmodel, x, u)
     # display(linearization_plot(ci, x, u))
-    setmodel!(ci.mpc, ci.linmodel)
+    # setmodel!(ci.mpc, ci.model)
     pop_append!(ci.U_data, u)
     pop_append!(ci.Y_data, y)
     pop_append!(ci.Ry_data, ry)
@@ -246,16 +227,16 @@ end
 Plot the linearization projected n timesteps into the future
 """
 function linearization_plot(ci::ControlInterface, x0, u0; n::Int=5)
-    linmodel = deepcopy(ci.linmodel)
+    model = deepcopy(ci.model)
     u = u0 .+ [0.0, 1.0, 0.0]
-    x_simple_0 = copy(linmodel.xop)
+    x_simple_0 = copy(model.xop)
     ci.simple_h!(x_simple_0, x0)
 
     x_simple_plus = similar(x_simple_0)
     ci.simple_f!(x_simple_plus, x0, u, ci.Ts*n)
-    lin_plus = linmodel.A * x_simple_0 + linmodel.Bu * u
+    lin_plus = model.A * x_simple_0 + model.Bu * u
     for _ in 1:n-1
-        lin_plus = linmodel.A * lin_plus + linmodel.Bu * u
+        lin_plus = model.A * lin_plus + model.Bu * u
     end
     p = plot()
     idx = 1
@@ -265,13 +246,13 @@ function linearization_plot(ci::ControlInterface, x0, u0; n::Int=5)
 end
 
 function linearize_process(ci::ControlInterface)
-    linearize!(ci.linmodel)
-    setmodel!(mpc, linmodel)
+    linearize!(ci.model)
+    setmodel!(mpc, model)
     xnext = zeros(length(x))
-    ModelPredictiveControl.f!(xnext, linmodel, x, u, nothing, nothing)
-    ci.error = (norm(xnext .- x) - norm(linmodel.fop .- x)) / norm(linmodel.fop .- x)
-    # @show norm(linmodel.fop .- linmodel.xop)
-    # @show norm((linmodel.A * linmodel.xop + linmodel.Bu * linmodel.uop) .- linmodel.xop)
+    ModelPredictiveControl.f!(xnext, model, x, u, nothing, nothing)
+    ci.error = (norm(xnext .- x) - norm(model.fop .- x)) / norm(model.fop .- x)
+    # @show norm(model.fop .- model.xop)
+    # @show norm((model.A * model.xop + model.Bu * model.uop) .- model.xop)
 end
 # @setup_workload begin
 #     @compile_workload begin

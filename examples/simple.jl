@@ -45,9 +45,9 @@ try
         t = i*Ts-Ts
         println("t = ", t)
 
-        y = zeros(ci.linmodel.ny)
-        ci.simple_h!(y, kite_real.integrator.u)
-        pos_y = kite_real.pos[kite_real.num_A][2] 
+        y = zeros(ci.model.ny)
+        ci.h!(y, kite_real.integrator.u, nothing, nothing)
+        pos_y = kite_real.pos[kite_real.num_A][2]
         @show pos_y
         # if (kite_real.pos[kite_real.num_A][2] < -3.0) wanted_heading = -deg2rad(1.0) end
         # if (kite_real.pos[kite_real.num_A][2] > 3.0) wanted_heading = deg2rad(1.0) end
