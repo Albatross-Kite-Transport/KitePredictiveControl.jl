@@ -22,3 +22,6 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
+
+[sources]
+KiteModels = {url = "https://github.com/ufechner7/KiteModels.jl", rev = "fix/improve-for-mpc"}
