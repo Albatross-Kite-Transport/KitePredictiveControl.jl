@@ -35,6 +35,10 @@ get_h = getu(mtk_model, [mtk_model.y])
 p = (integrator, set_x, set_u, get_h)
 
 function f!(xnext, x, u, _, p)
+    if any(isnan.(x)) || any(isnan.(u))
+        xnext .= NaN
+        return nothing
+    end
     (integrator, set_x, set_u, _) = p
     set_t!(integrator, 0.0)
     set_proposed_dt!(integrator, Ts)
@@ -42,28 +46,19 @@ function f!(xnext, x, u, _, p)
     set_u(integrator, u)
     step!(integrator, Ts)
     xnext .= integrator.u # sol.u is the state, called x in the function
-    nothing
+    return nothing
 end
 f!(zeros(2), zeros(2), 0.0, nothing, p)
 @time f!(zeros(2), zeros(2), 0.0, nothing, p)
 
-for i in 1:2
-    local xnext = zeros(2)
-    x = ones(2)
-    f!(xnext, x, 1.0, nothing, p)
-    @show xnext
-end
-for i in 1:2
-    local xnext = zeros(2)
-    x = zeros(2)
-    f!(xnext, x, 1.0, nothing, p)
-    @show xnext
-end
-for i in 1:2
-    local xnext = zeros(2)
-    x = zeros(2)
-    f!(xnext, x, 0.0, nothing, p)
-    @show xnext
+xnext = zeros(2)
+for x in [zeros(2), ones(2)]
+    for u in [[0.0], [1.0]]
+        for _ in 1:2
+            f!(xnext, x, u, nothing, p)
+            @info "x: $x u: $u xnext: $xnext"
+        end
+    end
 end
 
 function h!(y, x, _, p)
@@ -80,27 +75,16 @@ vy = [string(mtk_model.y)]
 model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
 linmodel = ModelPredictiveControl.linearize(model, x=zeros(2), u=zeros(1))
-display(linmodel.A); display(linmodel.Bu)
+@info "Linearized model: " linmodel.A linmodel.Bu
 
 u = [0.5]
 N = 35
-# res = sim!(model, N, u, )
-# plot(res, plotu=false)
-
-
 α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
 estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
-
 
 p_plant = deepcopy(p)
 p_plant[1].ps[mtk_model.K] = 1.25 * 1.2
 plant = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-# res = sim!(estim, N, [0.5], plant=plant, y_noise=[0.5])
-# plot(res, plotu=false, plotxwithx̂=true)
-
-# linmodel = ModelPredictiveControl.linearize(model, x=[π, 0], u=[0])
-
-
 
 Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
 nmpc = NonLinMPC(estim; transcription=SingleShooting(), gradient=ad_type, jacobian=ad_type, Hp, Hc, Mwt, Nwt, Cwt=Inf)
@@ -110,8 +94,7 @@ nmpc = setconstraint!(nmpc; umin, umax)
 unset_time_limit_sec(nmpc.optim)
 # set_optimizer_attribute(nmpc.optim, "max_iter", 2)
 res_ry = sim!(nmpc, 35, [180.0], plant=plant, x_0=[0, 0], x̂_0=[0, 0, 0])
-plot(res_ry)
-
 linmodel = ModelPredictiveControl.linearize(model, x=zeros(2), u=zeros(1))
-display(linmodel.A); display(linmodel.Bu)
+@info "Linearized model: " linmodel.A linmodel.Bu
+plot(res_ry)
 
