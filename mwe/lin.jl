@@ -26,7 +26,7 @@ end
 
 @mtkbuild mtk_model = Pendulum()
 prob = ODEProblem(mtk_model, nothing, (0.0, Ts))
-integrator = OrdinaryDiffEq.init(prob, FBDF(); dt=Ts, abstol=1e-8, reltol=1e-8, save_on=false, save_everystep=false)
+integrator = OrdinaryDiffEq.init(prob, FBDF(); dt=Ts, abstol=1e-6, reltol=1e-6, save_on=false, save_everystep=false)
 set_x = setu(mtk_model, unknowns(mtk_model))
 get_x = getu(mtk_model, unknowns(mtk_model))
 set_u = setp(mtk_model, [mtk_model.τ])
@@ -74,27 +74,47 @@ vu = [string(mtk_model.τ)]
 vy = [string(mtk_model.y)]
 model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-linmodel = ModelPredictiveControl.linearize(model, x=zeros(2), u=zeros(1))
+linmodel = ModelPredictiveControl.linearize(model, x=[0, 0], u=[0])
 @info "Linearized model: " linmodel.A linmodel.Bu
 
-u = [0.5]
-N = 35
-α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
+# using JuMP, DAQP
+# Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
+# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
+# umin, umax = [-1.5], [+1.5]
+# N = 35
+# daqp = Model(DAQP.Optimizer, add_bridges=false)
+# kf = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
+# mpc = LinMPC(kf; Hp, Hc, Mwt, Nwt, Cwt=Inf, optim=daqp)
+# mpc = setconstraint!(mpc; umin, umax)
 
-p_plant = deepcopy(p)
-p_plant[1].ps[mtk_model.K] = 1.25 * 1.2
-plant = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+# p_plant = deepcopy(p)
+# @assert p[1] != p_plant[1]
+# p_plant[1].ps[mtk_model.K] = 1.25 * 1.2
+# plant = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
-nmpc = NonLinMPC(estim; transcription=SingleShooting(), gradient=ad_type, jacobian=ad_type, Hp, Hc, Mwt, Nwt, Cwt=Inf)
-umin, umax = [-1.5], [+1.5]
-nmpc = setconstraint!(nmpc; umin, umax)
+# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x_0, x̂_0, y_step=[0])
+#     println("iterate")
+#     U_data, Y_data, Ry_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N)
+#     setstate!(plant, x_0)
+#     initstate!(mpc, [0], plant())
+#     setstate!(mpc, x̂_0)
+#     for i = 1:N
+#         y = plant() + y_step
+#         x̂ = preparestate!(mpc, y)
+#         u = moveinput!(mpc, ry)
+#         linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:2])
+#         setmodel!(mpc, linmodel)
+#         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
+#         updatestate!(mpc, u, y) # update mpc state estimate
+#         updatestate!(plant, u)  # update plant simulator
+#     end
+#     res = SimResult(mpc, U_data, Y_data; Ry_data)
+#     return res
+# end
 
-unset_time_limit_sec(nmpc.optim)
-# set_optimizer_attribute(nmpc.optim, "max_iter", 2)
-res_ry = sim!(nmpc, 35, [180.0], plant=plant, x_0=[0, 0], x̂_0=[0, 0, 0])
-linmodel = ModelPredictiveControl.linearize(model, x=zeros(2), u=zeros(1))
-@info "Linearized model: " linmodel.A linmodel.Bu
-plot(res_ry)
+
+# x_0 = [0, 0]; x̂_0 = [0, 0, 0]; ry = [180]
+# res_slin = sim_adapt!(mpc, model, N, ry, plant, x_0, x̂_0)
+# plot(res_slin)
+
 

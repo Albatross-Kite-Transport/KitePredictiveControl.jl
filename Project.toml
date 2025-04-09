@@ -5,6 +5,7 @@ version = "0.0.0"
 
 [deps]
 ControlSystems = "a6e380b2-a6ca-5380-bf3e-84a91bcd477e"
+DAQP = "c47d62df-3981-49c8-9651-128b1cd08617"
 DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 FiniteDiff = "6a86dc24-6348-571c-b903-95158fe2bd41"
@@ -32,6 +33,7 @@ KiteModels = {rev = "feat/4-tether", url = "https://github.com/ufechner7/KiteMod
 ModelPredictiveControl = {rev = "main", url = "https://github.com/JuliaControl/ModelPredictiveControl.jl"}
 
 [compat]
+DAQP = "0.6.0"
 DifferentiationInterface = "0.6.50"
 FiniteDiff = "2.27.0"
 Ipopt = "1.8.0"
