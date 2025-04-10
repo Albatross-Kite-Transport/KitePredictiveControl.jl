@@ -2,3 +2,4 @@ Manifest.toml
 *.jlprof
 *.jld2
 *.bin
+prob.bin
