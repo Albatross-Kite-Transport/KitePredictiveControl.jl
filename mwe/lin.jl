@@ -39,13 +39,12 @@ function f!(xnext, x, u, _, p)
         xnext .= NaN
         return nothing
     end
-    (integrator, set_x, set_u, _) = p
-    set_t!(integrator, 0.0)
-    set_proposed_dt!(integrator, Ts)
-    set_x(integrator, x)
+    (integrator, _, set_u, _) = p
+    reinit!(integrator, x; reinit_dae=false)
     set_u(integrator, u)
     step!(integrator, Ts)
     xnext .= integrator.u # sol.u is the state, called x in the function
+    # @info "x: $x u: $u xnext: $xnext"
     return nothing
 end
 f!(zeros(2), zeros(2), 0.0, nothing, p)
@@ -76,45 +75,3 @@ model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p, solver=nothing, jacobian
 
 linmodel = ModelPredictiveControl.linearize(model, x=[0, 0], u=[0])
 @info "Linearized model: " linmodel.A linmodel.Bu
-
-# using JuMP, DAQP
-# Hp, Hc, Mwt, Nwt = 20, 2, [0.5], [2.5]
-# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-# umin, umax = [-1.5], [+1.5]
-# N = 35
-# daqp = Model(DAQP.Optimizer, add_bridges=false)
-# kf = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
-# mpc = LinMPC(kf; Hp, Hc, Mwt, Nwt, Cwt=Inf, optim=daqp)
-# mpc = setconstraint!(mpc; umin, umax)
-
-# p_plant = deepcopy(p)
-# @assert p[1] != p_plant[1]
-# p_plant[1].ps[mtk_model.K] = 1.25 * 1.2
-# plant = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-
-# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x_0, x̂_0, y_step=[0])
-#     println("iterate")
-#     U_data, Y_data, Ry_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N)
-#     setstate!(plant, x_0)
-#     initstate!(mpc, [0], plant())
-#     setstate!(mpc, x̂_0)
-#     for i = 1:N
-#         y = plant() + y_step
-#         x̂ = preparestate!(mpc, y)
-#         u = moveinput!(mpc, ry)
-#         linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:2])
-#         setmodel!(mpc, linmodel)
-#         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
-#         updatestate!(mpc, u, y) # update mpc state estimate
-#         updatestate!(plant, u)  # update plant simulator
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data)
-#     return res
-# end
-
-
-# x_0 = [0, 0]; x̂_0 = [0, 0, 0]; ry = [180]
-# res_slin = sim_adapt!(mpc, model, N, ry, plant, x_0, x̂_0)
-# plot(res_slin)
-
-

@@ -5,7 +5,7 @@ Use a nonlinear MTK model with online linearization and a linear MPC using Model
 using ModelPredictiveControl, ModelingToolkit, Plots, JuMP, Ipopt, OrdinaryDiffEq, FiniteDiff, DifferentiationInterface, DAQP
 using ModelingToolkit: D_nounits as D, t_nounits as t, setu, setp, getu, getp
 
-ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
+ad_type = AutoFiniteDiff(relstep=0.01, absstep=0.01)
 Ts = 0.1
 
 @mtkmodel Pendulum begin
@@ -43,15 +43,12 @@ function f!(xnext, x, u, _, p)
     #     xnext .= NaN
     #     return nothing
     # end
-    (integrator, set_x, set_u, _) = p
-    # set_t!(integrator, 0.0)
-    # set_x(integrator, x)
+    (integrator, _, set_u, _) = p
     reinit!(integrator, x; reinit_dae=false)
-    set_proposed_dt!(integrator, Ts)
     set_u(integrator, u)
     step!(integrator, Ts)
     xnext .= integrator.u # sol.u is the state, called x in the function
-    @info "x: $x u: $u xnext: $xnext"
+    # @info "x: $x u: $u xnext: $xnext"
     return nothing
 end
 
@@ -96,8 +93,7 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x_0, x̂_0, y_step=[0])
     for i = 1:N
         y = plant() + y_step
         x̂ = preparestate!(mpc, y)
-        @show ry
-        u = moveinput!(mpc, ry)
+        @time u = moveinput!(mpc, ry)
         linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:2])
         setmodel!(mpc, linmodel)
         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
