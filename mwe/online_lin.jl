@@ -38,13 +38,11 @@ get_u = getp(mtk_model, [mtk_model.τ])
 get_h = getu(mtk_model, [mtk_model.y])
 p = (integrator, set_x, set_u, get_h)
 
+iter = 0
 function f!(xnext, x, u, _, p)
-    # if any(isnan.(x)) || any(isnan.(u))
-    #     xnext .= NaN
-    #     return nothing
-    # end
+    global iter += 1
     (integrator, _, set_u, _) = p
-    reinit!(integrator, x; reinit_dae=false)
+    OrdinaryDiffEq.reinit!(integrator, x; reinit_dae=false)
     set_u(integrator, u)
     step!(integrator, Ts)
     xnext .= integrator.u # sol.u is the state, called x in the function
@@ -85,6 +83,7 @@ kf = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc3 = LinMPC(kf; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc3 = setconstraint!(mpc3; umin, umax)
 
+iter = 0
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x_0, x̂_0, y_step=[0])
     U_data, Y_data, Ry_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N)
     setstate!(plant, x_0)

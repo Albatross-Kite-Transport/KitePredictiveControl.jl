@@ -29,7 +29,7 @@ SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
 Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 
 [sources]
-KiteModels = {rev = "feat/4-tether", url = "https://github.com/ufechner7/KiteModels.jl"}
+KiteModels = {rev = "develop", url = "https://github.com/ufechner7/KiteModels.jl"}
 ModelPredictiveControl = {rev = "main", url = "https://github.com/JuliaControl/ModelPredictiveControl.jl"}
 
 [compat]
@@ -38,5 +38,7 @@ DifferentiationInterface = "0.6.50"
 FiniteDiff = "2.27.0"
 Ipopt = "1.8.0"
 JuMP = "1.25.0"
+KiteModels = "0.6.17"
 KiteUtils = "0.10.0"
 SimpleDiffEq = "1.11.1"
+ModelingToolkit = "9.72.0"
