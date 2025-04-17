@@ -31,7 +31,7 @@ Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 VortexStepMethod = "ed3cd733-9f0f-46a9-93e0-89b8d4998dd9"
 
 [sources]
-KiteModels = {rev = "develop", url = "https://github.com/ufechner7/KiteModels.jl"}
+KiteModels = {rev = "cholesky", url = "https://github.com/ufechner7/KiteModels.jl"}
 
 [compat]
 DAQP = "0.6.0"
