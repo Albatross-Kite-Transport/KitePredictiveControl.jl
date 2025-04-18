@@ -56,7 +56,7 @@ end
 solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
 function f(x, u, _, p)
-    (s, set_x, set_u, get_x, dt) = p
+    (s, set_x, set_u, get_x, _, dt, _) = p
     set_x(s.prob, x)
     set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
@@ -65,13 +65,15 @@ function f(x, u, _, p)
 end
 
 function f_plant(x, u, _, p)
-    (s, _, _, get_x, dt) = p
+    (s, _, _, get_x, _, dt, _) = p
     next_step!(s, u; dt)
     return get_x(s.integrator)
 end
 
-function h(x, _, _)
-    return x
+function h(x, _, p)
+    (s, _, _, _, get_y, _, set_xh) = p
+    set_xh(s.integrator, x)
+    return get_y(s.integrator)
 end
 
 # Get initial state
@@ -79,36 +81,43 @@ iter = 0
 function get_p(s)
     @show s.set.segments
     x_vec = KiteModels.get_unknowns(s)
+    y_vec = [
+        x_vec
+        s.sys.angle_of_attack
+    ]
     inputs = collect(s.sys.set_values)
     set_x = setu(s.integrator, Initial.(x_vec))
+    set_xh = setu(s.integrator, x_vec)
     set_u = setu(s.integrator, inputs)
     get_x = getu(s.integrator, x_vec)
+    get_y = getu(s.integrator, y_vec)
     x0 = get_x(s.integrator)
-    return (s_model, set_x, set_u, get_x, dt), x_vec, x0, inputs
+    return (s_model, set_x, set_u, get_x, get_y, dt, set_xh), x_vec, y_vec, x0, inputs
 end
-p_model, x_vec, x0, inputs = get_p(s_model)
-p_plant, _, _, _ = get_p(s_plant)
+p_model, x_vec, y_vec, x0, inputs = get_p(s_model)
+p_plant, _, _, _, _ = get_p(s_plant)
 sys = s_model.sys
 
-nu, nx, ny = length(inputs), length(x_vec), length(x_vec)
+nu, nx, ny = length(inputs), length(x_vec), length(y_vec)
 norms = Float64[]
 for x in [x0, x0 .+ 0.01]
     for u in [[-50, 0, 0], [-50, -1, -1]]
         xnext = f(x, u, nothing, p_model)
         push!(norms, norm(xnext))
-        @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext))"
+        ynext = h(xnext, nothing, p_model)
+        @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
     end
 end
 @assert length(unique(norms)) == length(norms) "Different inputs/states should produce different outputs"
 
-x_idx = Dict{Num, Int}()
-for (idx, sym) in enumerate(x_vec)
-    x_idx[sym] = idx
+y_idx = Dict{Num, Int}()
+for (idx, sym) in enumerate(y_vec)
+    y_idx[sym] = idx
 end
 
 vx = string.(x_vec)
 vu = string.(inputs)
-vy = vx
+vy = string.(y_vec)
 model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 s_model = p_model[1]
 setstate!(model, x0)
@@ -135,8 +144,9 @@ iter = 0
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
 Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
-Mwt[x_idx[sys.ω_b[3]]] = 1.0
-Mwt[x_idx[sys.tether_length[1]]] = 1.0
+Mwt[y_idx[sys.ω_b[3]]] = 1.0
+Mwt[y_idx[sys.tether_length[1]]] = 1.0
+Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
 @show Mwt
 
 u0 = [-50, -1, -1]
@@ -189,16 +199,18 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     return res
 end
 
-ry = x0
+ry = p_model[5](s_model.integrator)
 x̂0 = [
     x0
     x0
+    0.0
 ]
 res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
 y_idxs = [
-    [x_idx[sys.ω_b[i]] for i in 1:3]
-    x_idx[sys.tether_length[1]]
-    x_idx[sys.kite_pos[1]]
+    [y_idx[sys.ω_b[i]] for i in 1:3]
+    y_idx[sys.tether_length[1]]
+    y_idx[sys.kite_pos[1]]
+    y_idx[sys.angle_of_attack]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
 
