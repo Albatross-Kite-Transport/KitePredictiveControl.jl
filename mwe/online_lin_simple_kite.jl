@@ -39,6 +39,20 @@ end
 stabilize!(s_model)
 stabilize!(s_plant)
 
+function linearize_vsm!(s::RamAirKite)
+    y = s.get_y(s.integrator.u)
+    jac, x = VortexStepMethod.linearize(
+        s.vsm_solver, 
+        s.aero, 
+        y;
+        va_idxs=1:3, 
+        omega_idxs=4:6,
+        theta_idxs=7:6+length(s.point_system.groups),
+        moment_frac=s.bridle_fracs[s.point_system.groups[1].fixed_index])
+    set_vsm(s.prob, [x, y, jac])
+    nothing
+end
+
 solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
 function f(x, u, _, p)
@@ -46,6 +60,7 @@ function f(x, u, _, p)
     set_x(s.prob, x)
     set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
+    # @show norm(sol.ps[sys.vsm_jac])
     return get_x(sol)[1]
 end
 
@@ -95,10 +110,12 @@ vx = string.(x_vec)
 vu = string.(inputs)
 vy = vx
 model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+s_model = p_model[1]
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
 umin, umax = [-100, -20, -20], [0, 0, 0]
+Δumin, Δumax = [-1, -0.1, -0.1], [1, 0.1, 0.1]
 u = [-50, -5, 0]
 N = 10
 # res = sim!(model, N, u; x_0=x0)
@@ -111,16 +128,15 @@ N = 10
 nint_u = fill(1, nu)
 
 plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+s_plant = p_plant[1]
 iter = 0
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
-Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(0.1, nu)
-Mwt[x_idx[sys.ω_b[2]]] = 1.0
+Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
+Mwt[x_idx[sys.ω_b[3]]] = 1.0
 Mwt[x_idx[sys.tether_length[1]]] = 1.0
-# Mwt[x_idx[sys.tether_vel[2]]] = 0.01
-# Mwt[x_idx[sys.tether_vel[3]]] = 0.01
 @show Mwt
 
 u0 = [-50, -1, -1]
@@ -131,7 +147,7 @@ display(linmodel.A); display(linmodel.Bu)
 
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-mpc = setconstraint!(mpc; umin, umax)
+mpc = setconstraint!(mpc; umin, umax, Δumin, Δumax)
 
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
@@ -140,16 +156,27 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     setstate!(mpc, x̂_0)
     for i = 1:N
         t = @elapsed begin
-            KiteModels.linearize_vsm!(p_plant[1])
-            KiteModels.linearize_vsm!(p_model[1])
-
+            
             y = plant() + y_step
             x̂ = preparestate!(mpc, y)
             u = moveinput!(mpc, ry)
             
+            vsm_y = s_plant.get_y(s_plant.integrator) # TODO: use model
+            @show norm(vsm_y)
+            vsm_jac, vsm_x = VortexStepMethod.linearize(
+                s_model.vsm_solver, 
+                s_model.aero, 
+                vsm_y;
+                va_idxs=1:3, 
+                omega_idxs=4:6,
+                theta_idxs=7:6+length(s_model.point_system.groups),
+                moment_frac=s_model.bridle_fracs[s_model.point_system.groups[1].fixed_index])
+            s_model.set_vsm(s_model.prob, [vsm_x, vsm_y, vsm_jac])
+            s_plant.set_vsm(p_plant[1].integrator, [vsm_x, vsm_y, vsm_jac])
+
             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
             setmodel!(mpc, linmodel)
-            @show norm(linmodel.A)
+            # @show norm(linmodel.A)
             
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
@@ -173,4 +200,5 @@ y_idxs = [
     x_idx[sys.tether_length[1]]
     x_idx[sys.kite_pos[1]]
 ]
-plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
+Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
+
