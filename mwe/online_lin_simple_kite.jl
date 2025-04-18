@@ -29,6 +29,7 @@ set_values = measure.set_values
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false)
 KiteModels.init_sim!(s_plant, measure; remake=false)
+sys = s_model.sys
 
 function stabilize!(s)
     # Stabilize system
@@ -39,6 +40,7 @@ function stabilize!(s)
     for i in 1:10
         set_values = -s.set.drum_radius * s.integrator[s.sys.winch_force]
         KiteModels.next_step!(s, set_values; dt)
+        @show set_values
         # plot_kite(s, i-1)
     end
 end
@@ -62,27 +64,26 @@ end
 solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
 function f(x, u, _, p)
-    (s, set_x, set_u, get_x, _, get_winch_force, dt, _) = p
+    (s, set_x, set_u, get_x, _, dt, _) = p
     set_x(s.prob, x)
-    set_x(s.integrator, x)
-    set_values = -s.set.drum_radius * get_winch_force(s.integrator) + u
-    set_u(s.prob, set_values)
+    set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
-    # @show norm(sol.ps[sys.vsm_jac])
     return get_x(sol)[1]
 end
 
 function f_plant(x, u, _, p)
-    (s, _, _, get_x, _, get_winch_force, dt, _) = p
-    set_values = -s.set.drum_radius * get_winch_force(s.integrator) + u
-    next_step!(s, set_values; dt)
+    (s, _, _, get_x, _, dt, _) = p
+    @show u
+    next_step!(s, u; dt)
+    @show s.integrator[s.sys.tether_length[1]]
     return get_x(s.integrator)
 end
 
 function h(x, _, p)
-    (s, _, _, _, get_y, _, _, set_xh) = p
+    (s, _, _, _, get_y, _, set_xh) = p
     set_xh(s.integrator, x)
-    return get_y(s.integrator)
+    y = get_y(s.integrator)
+    return y
 end
 
 # Get initial state
@@ -92,20 +93,21 @@ function get_p(s)
     y_vec = [
         x_vec
         s.sys.angle_of_attack
+        s.sys.heading_x
+        s.sys.tether_acc
     ]
     inputs = collect(s.sys.set_values)
     set_x = setu(s.integrator, Initial.(x_vec))
     set_xh = setu(s.integrator, x_vec)
     set_u = setu(s.integrator, inputs)
-    get_winch_force = getu(s.integrator, sys.winch_force)
     get_x = getu(s.integrator, x_vec)
     get_y = getu(s.integrator, y_vec)
     x0 = get_x(s.integrator)
-    return (s_model, set_x, set_u, get_x, get_y, get_winch_force, dt, set_xh), x_vec, y_vec, x0, inputs
+    u0 = -s.set.drum_radius * s.integrator[sys.winch_force]
+    return (s, set_x, set_u, get_x, get_y, dt, set_xh), x_vec, y_vec, x0, u0, inputs
 end
-p_model, x_vec, y_vec, x0, inputs = get_p(s_model)
-p_plant, _, _, _, _ = get_p(s_plant)
-sys = s_model.sys
+p_model, x_vec, y_vec, x0, u0, inputs = get_p(s_model)
+p_plant, _, _, _, _, _ = get_p(s_plant)
 
 nu, nx, ny = length(inputs), length(x_vec), length(y_vec)
 norms = Float64[]
@@ -132,14 +134,8 @@ s_model = p_model[1]
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
-umin, umax = [-1, -1, -1], [1, 1, 1]
-ymin, ymax = fill(-Inf, ny), fill(Inf, ny)
-# ymin[y_idx[sys.tether_length[2]]] = x0[y_idx[sys.tether_length[2]]] - 0.1
-# ymin[y_idx[sys.tether_length[3]]] = x0[y_idx[sys.tether_length[3]]] - 0.1
-# ymax[y_idx[sys.tether_length[1]]] = x0[y_idx[sys.tether_length[1]]] + 0.1
-# Δumin, Δumax = [-1.0, -0.5, -0.5], [1.0, 0.5, 0.5]
 u = [-50, -5, 0]
-N = 100
+N = 20
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
@@ -156,19 +152,24 @@ iter = 0
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
-Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
-Mwt[y_idx[sys.ω_b[3]]] = 1.0
-Mwt[y_idx[sys.tether_length[1]]] = 1.0
-Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
+Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(0.1, nu)
+Mwt[y_idx[sys.tether_vel[1]]] = 1.0
+# Mwt[y_idx[sys.heading_x]] = 1.0
+# Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
 
-u0 = -s_model.set.drum_radius * s_model.integrator[sys.winch_force]
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
 display(linmodel.A); display(linmodel.Bu)
 
+umin, umax = [-100, -20, -20], [0, 0, 0]
+ymin, ymax = fill(-Inf, ny), fill(Inf, ny)
+[ymin[y_idx[sys.tether_acc[i]]] = -10.0 for i in 1:3]
+[ymax[y_idx[sys.tether_acc[i]]] = 10.0 for i in 1:3]
+Δumin, Δumax = fill(-1, nu), fill(1, nu)
+
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-mpc = setconstraint!(mpc; umin, umax, ymin, ymax)
+mpc = setconstraint!(mpc; umin, umax)
 
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
@@ -192,7 +193,7 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
                 theta_idxs=7:6+length(s_model.point_system.groups),
                 moment_frac=s_model.bridle_fracs[s_model.point_system.groups[1].fixed_index])
             s_model.set_vsm(s_model.prob, [vsm_x, vsm_y, vsm_jac])
-            s_plant.set_vsm(p_plant[1].integrator, [vsm_x, vsm_y, vsm_jac])
+            s_plant.set_vsm(s_plant.integrator, [vsm_x, vsm_y, vsm_jac])
 
             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
             setmodel!(mpc, linmodel)
@@ -209,18 +210,11 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
 end
 
 ry = p_model[5](s_model.integrator)
-ry[y_idx[sys.angle_of_attack]] = deg2rad(20)
+ry[y_idx[sys.angle_of_attack]] = deg2rad(10)
 x̂0 = [
     x0
-    x0
-    0.0
+    p_model[5](s_model.integrator)
 ]
 res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
-y_idxs = [
-    [y_idx[sys.ω_b[i]] for i in 1:3]
-    y_idx[sys.tether_length[1]]
-    y_idx[sys.kite_pos[1]]
-    y_idx[sys.angle_of_attack]
-]
+y_idxs = findall(x -> x != 0.0, Mwt)
 Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
-
