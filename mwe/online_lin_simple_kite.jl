@@ -9,7 +9,7 @@ using ControlPlots
 
 include(joinpath(@__DIR__, "plotting.jl"))
 
-ad_type = AutoFiniteDiff(relstep=0.01, absstep=0.01)
+ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
@@ -35,6 +35,12 @@ function stabilize!(s)
     s.integrator.ps[s.sys.steady] = true
     next_step!(s; dt=10.0, vsm_interval=1)
     s.integrator.ps[s.sys.steady] = false
+    @info "Init"
+    for i in 1:10
+        set_values = -s.set.drum_radius * s.integrator[s.sys.winch_force]
+        KiteModels.next_step!(s, set_values; dt)
+        # plot_kite(s, i-1)
+    end
 end
 stabilize!(s_model)
 stabilize!(s_plant)
@@ -56,22 +62,25 @@ end
 solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
 function f(x, u, _, p)
-    (s, set_x, set_u, get_x, _, dt, _) = p
+    (s, set_x, set_u, get_x, _, get_winch_force, dt, _) = p
     set_x(s.prob, x)
-    set_u(s.prob, u)
+    set_x(s.integrator, x)
+    set_values = -s.set.drum_radius * get_winch_force(s.integrator) + u
+    set_u(s.prob, set_values)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
     # @show norm(sol.ps[sys.vsm_jac])
     return get_x(sol)[1]
 end
 
 function f_plant(x, u, _, p)
-    (s, _, _, get_x, _, dt, _) = p
-    next_step!(s, u; dt)
+    (s, _, _, get_x, _, get_winch_force, dt, _) = p
+    set_values = -s.set.drum_radius * get_winch_force(s.integrator) + u
+    next_step!(s, set_values; dt)
     return get_x(s.integrator)
 end
 
 function h(x, _, p)
-    (s, _, _, _, get_y, _, set_xh) = p
+    (s, _, _, _, get_y, _, _, set_xh) = p
     set_xh(s.integrator, x)
     return get_y(s.integrator)
 end
@@ -79,7 +88,6 @@ end
 # Get initial state
 iter = 0
 function get_p(s)
-    @show s.set.segments
     x_vec = KiteModels.get_unknowns(s)
     y_vec = [
         x_vec
@@ -89,10 +97,11 @@ function get_p(s)
     set_x = setu(s.integrator, Initial.(x_vec))
     set_xh = setu(s.integrator, x_vec)
     set_u = setu(s.integrator, inputs)
+    get_winch_force = getu(s.integrator, sys.winch_force)
     get_x = getu(s.integrator, x_vec)
     get_y = getu(s.integrator, y_vec)
     x0 = get_x(s.integrator)
-    return (s_model, set_x, set_u, get_x, get_y, dt, set_xh), x_vec, y_vec, x0, inputs
+    return (s_model, set_x, set_u, get_x, get_y, get_winch_force, dt, set_xh), x_vec, y_vec, x0, inputs
 end
 p_model, x_vec, y_vec, x0, inputs = get_p(s_model)
 p_plant, _, _, _, _ = get_p(s_plant)
@@ -123,10 +132,14 @@ s_model = p_model[1]
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
-umin, umax = [-100, -20, -20], [0, 0, 0]
-Δumin, Δumax = [-1, -0.1, -0.1], [1, 0.1, 0.1]
+umin, umax = [-1, -1, -1], [1, 1, 1]
+ymin, ymax = fill(-Inf, ny), fill(Inf, ny)
+# ymin[y_idx[sys.tether_length[2]]] = x0[y_idx[sys.tether_length[2]]] - 0.1
+# ymin[y_idx[sys.tether_length[3]]] = x0[y_idx[sys.tether_length[3]]] - 0.1
+# ymax[y_idx[sys.tether_length[1]]] = x0[y_idx[sys.tether_length[1]]] + 0.1
+# Δumin, Δumax = [-1.0, -0.5, -0.5], [1.0, 0.5, 0.5]
 u = [-50, -5, 0]
-N = 10
+N = 100
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
@@ -147,17 +160,15 @@ Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
 Mwt[y_idx[sys.ω_b[3]]] = 1.0
 Mwt[y_idx[sys.tether_length[1]]] = 1.0
 Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
-@show Mwt
 
-u0 = [-50, -1, -1]
+u0 = -s_model.set.drum_radius * s_model.integrator[sys.winch_force]
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
 display(linmodel.A); display(linmodel.Bu)
-@show norm(linmodel.A)
 
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
-mpc = setconstraint!(mpc; umin, umax, Δumin, Δumax)
+mpc = setconstraint!(mpc; umin, umax, ymin, ymax)
 
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
@@ -172,7 +183,6 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
             u = moveinput!(mpc, ry)
             
             vsm_y = s_plant.get_y(s_plant.integrator) # TODO: use model
-            @show norm(vsm_y)
             vsm_jac, vsm_x = VortexStepMethod.linearize(
                 s_model.vsm_solver, 
                 s_model.aero, 
@@ -186,20 +196,20 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
 
             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
             setmodel!(mpc, linmodel)
-            # @show norm(linmodel.A)
             
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
         end
-        plot_kite(p_plant[1], i-1)
+        plot_kite(s_plant, i-1)
         updatestate!(plant, u)  # update plant simulator
-        println("$(dt/t) times realtime at timestep $i.")
+        println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)).")
     end
     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data)
     return res
 end
 
 ry = p_model[5](s_model.integrator)
+ry[y_idx[sys.angle_of_attack]] = deg2rad(20)
 x̂0 = [
     x0
     x0
