@@ -11,35 +11,30 @@ ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 # Initialize model
-set = se("system_ram.yaml")
-set.segments = 2
-set.quasi_static = true
-set.bridle_fracs = [0.0, 0.93]
-set.sample_freq = 20
-set.physical_model = "simple_ram"
-dt = 1/set.sample_freq
+set_model = deepcopy(se("system_model.yaml"))
+dt = 1/set_model.sample_freq
+s_model = RamAirKite(set_model)
 
-wing = RamAirWing(set; prn=false, n_groups=2)
-aero = BodyAerodynamics([wing])
-vsm_solver = Solver(aero; solver_type=NONLIN, atol=2e-8, rtol=2e-8)
-point_system = PointMassSystem(set, wing)
-s = RamAirKite(set, aero, vsm_solver, point_system)
+set_plant = deepcopy(se("system_plant.yaml"))
+s_plant = RamAirKite(set_plant)
 
 measure = Measurement()
 measure.set_values .= [-55, -4.0, -4.0]  # Set values of the torques of the three winches. [Nm]
 set_values = measure.set_values
-s.set.abs_tol = 1e-5
-s.set.rel_tol = 1e-5
 
 # Initialize at elevation
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
-KiteModels.init_sim!(s, measure; remake=false)
-sys = s.sys
+KiteModels.init_sim!(s_model, measure; remake=false)
+KiteModels.init_sim!(s_plant, measure; remake=false)
 
-# Stabilize system
-s.integrator.ps[sys.steady] = true
-next_step!(s; dt=10.0, vsm_interval=1)
-s.integrator.ps[sys.steady] = false
+function stabilize!(s)
+    # Stabilize system
+    s.integrator.ps[s.sys.steady] = true
+    next_step!(s; dt=10.0, vsm_interval=1)
+    s.integrator.ps[s.sys.steady] = false
+end
+stabilize!(s_model)
+stabilize!(s_plant)
 
 solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
@@ -58,23 +53,29 @@ end
 
 # Get initial state
 iter = 0
-x_vec = KiteModels.get_unknowns(s)
-inputs = collect(sys.set_values)
-set_x = setu(s.integrator, Initial.(x_vec))
-set_u = setu(s.integrator, inputs)
-get_x = getu(s.integrator, x_vec)
-x0 = get_x(s.integrator)
-p = (s, set_x, set_u, get_x, dt)
+function get_p(s)
+    @show s.set.segments
+    x_vec = KiteModels.get_unknowns(s)
+    inputs = collect(s.sys.set_values)
+    set_x = setu(s.integrator, Initial.(x_vec))
+    set_u = setu(s.integrator, inputs)
+    get_x = getu(s.integrator, x_vec)
+    x0 = get_x(s.integrator)
+    return (s_model, set_x, set_u, get_x, dt), x_vec, x0, inputs
+end
+p_model, x_vec, x0, inputs = get_p(s_model)
+p_plant, _, _, _ = get_p(s_plant)
 
 nu, nx, ny = length(inputs), length(x_vec), length(x_vec)
+norms = Float64[]
 for x in [x0, x0 .+ 0.01]
     for u in [[-50, 0, 0], [-50, -1, -1]]
-        for _ in 1:2
-            xnext = f(x, u, nothing, p)
-            @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext))"
-        end
+        xnext = f(x, u, nothing, p_model)
+        push!(norms, norm(xnext))
+        @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext))"
     end
 end
+@assert length(unique(norms)) == length(norms) "Different inputs/states should produce different outputs"
 
 x_idx = Dict{Num, Int}()
 for (idx, sym) in enumerate(x_vec)
@@ -84,14 +85,14 @@ end
 vx = string.(x_vec)
 vu = string.(inputs)
 vy = vx
-model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
 umin, umax = [-100, -20, -20], [0, 0, 0]
 u = [-50, -5, 0]
 N = 45
-# res = sim!(model, N, u; x0=x0)
+# res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 α=0.01
@@ -100,12 +101,11 @@ N = 45
 σQint_u = fill(0.1, nu)
 nint_u = fill(1, nu)
 
-p_plant = deepcopy(p)
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 iter = 0
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
-# res = sim!(estim, N, [-50, -0.1, -0.1]; x0=x0, plant=plant, y_noise=fill(0.01, ny))
-# plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, plotxwithx̂=false, size=(900, 900))
+# res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
+# plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
 Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(0.1, nu)
 Mwt[x_idx[sys.ω_b[2]]] = 1.0
@@ -131,14 +131,16 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     setstate!(mpc, x̂_0)
     for i = 1:N
         t = @elapsed begin
+            linearize_vsm!(p_plant[1])
+            linearize_vsm!(p_model[1])
+
             y = plant() + y_step
             x̂ = preparestate!(mpc, y)
             u = moveinput!(mpc, ry)
-
-            # if i%2 == 0
-                linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
-                setmodel!(mpc, linmodel)
-            # end
+            
+            linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
+            setmodel!(mpc, linmodel)
+            @show norm(linmodel.A)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
