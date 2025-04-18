@@ -5,8 +5,11 @@ Use a nonlinear MTK model with online linearization and a linear MPC using Model
 using KiteModels, KiteUtils, LinearAlgebra
 using ModelPredictiveControl, ModelingToolkit, Plots, JuMP, Ipopt, OrdinaryDiffEq, FiniteDiff, DifferentiationInterface
 using ModelingToolkit: D_nounits as D, t_nounits as t, setu, setp, getu, getp
+using ControlPlots
 
-ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
+include(joinpath(@__DIR__, "plotting.jl"))
+
+ad_type = AutoFiniteDiff(relstep=0.01, absstep=0.01)
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
@@ -40,11 +43,16 @@ solver = FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.4))
 # Function to step simulation with input u
 function f(x, u, _, p)
     (s, set_x, set_u, get_x, dt) = p
-    global iter += 1
     set_x(s.prob, x)
     set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
     return get_x(sol)[1]
+end
+
+function f_plant(x, u, _, p)
+    (s, _, _, get_x, dt) = p
+    next_step!(s, u; dt)
+    return get_x(s.integrator)
 end
 
 function h(x, _, _)
@@ -65,6 +73,7 @@ function get_p(s)
 end
 p_model, x_vec, x0, inputs = get_p(s_model)
 p_plant, _, _, _ = get_p(s_plant)
+sys = s_model.sys
 
 nu, nx, ny = length(inputs), length(x_vec), length(x_vec)
 norms = Float64[]
@@ -91,7 +100,7 @@ setstate!(model, x0)
 
 umin, umax = [-100, -20, -20], [0, 0, 0]
 u = [-50, -5, 0]
-N = 45
+N = 10
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
@@ -101,7 +110,7 @@ N = 45
 σQint_u = fill(0.1, nu)
 nint_u = fill(1, nu)
 
-plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 iter = 0
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
@@ -131,8 +140,8 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
     setstate!(mpc, x̂_0)
     for i = 1:N
         t = @elapsed begin
-            linearize_vsm!(p_plant[1])
-            linearize_vsm!(p_model[1])
+            KiteModels.linearize_vsm!(p_plant[1])
+            KiteModels.linearize_vsm!(p_model[1])
 
             y = plant() + y_step
             x̂ = preparestate!(mpc, y)
@@ -141,10 +150,11 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
             setmodel!(mpc, linmodel)
             @show norm(linmodel.A)
-
+            
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
         end
+        plot_kite(p_plant[1], i-1)
         updatestate!(plant, u)  # update plant simulator
         println("$(dt/t) times realtime at timestep $i.")
     end
