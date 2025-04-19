@@ -2,14 +2,12 @@ using KiteModels, LinearAlgebra, ModelPredictiveControl, ModelingToolkit, Ordina
 using ModelingToolkit: setu, setp, getu, getp
 using LaTeXStrings, ControlPlots, KiteUtils
 
-ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
+ad_type = AutoFiniteDiff()
 
 # Simulation parameters
 dt = 0.05
-total_time = 0.1
+total_time = 0.2
 steps = Int(round(total_time / dt))
-steering_freq = 1/2  # Hz
-steering_magnitude = 1.0  # Nm
 
 # Initialize model
 set_data_path(joinpath(@__DIR__, "../data"))
@@ -63,7 +61,18 @@ function f(x, u, _, p)
     set_x(s.prob, x)
     set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
+    @info "Input $(u[2]) results in $(sol[s.sys.tether_vel[2]][end])"
     return get_x(sol)[1]
+end
+
+# Function to step simulation with input u
+function f_integ(x, u, _, p)
+    (s, set_x, set_u, get_x, get_y, dt, set_xh) = p
+    set_xh(s.integrator, x)
+    set_u(s.integrator, u)
+    OrdinaryDiffEq.reinit!(s.integrator, s.integrator.u; reinit_dae=true)
+    OrdinaryDiffEq.step!(s.integrator, dt)
+    return get_x(s.integrator)
 end
 
 function h(x, _, p)
@@ -91,33 +100,28 @@ setstate!(plant, x0)
 nonlin_states = zeros(nx, steps)
 plant_states = zeros(nx, steps)
 lin_states = fill(NaN, nx, steps)
-lin_states[:,1] .= x0
 times = zeros(steps)
+nonlin_states[:,1] .= x0
+plant_states[:,1] .= x0
+lin_states[:,1] .= x0
+t = 0.0
+times[1] = t
+
+linmodel = ModelPredictiveControl.linearize(model; u=u0, x=x0)
 
 # Simulation loop
-t = 0.0
-linmodel = nothing
-for i in 1:steps
+for i in 2:steps
     global linmodel, t
     # Calculate inputs
-    steering = steering_magnitude * cos(2π * steering_freq * t)
-    set_values = -s.set.drum_radius .* s.integrator[sys.winch_force]
-    u = [set_values[1], set_values[2] + steering, set_values[3] - steering]
+    u = [-100, -100, -100]
     
     # Update states
     nonlin_states[:,i] = updatestate!(model, u)
     plant_states[:,i] = updatestate!(plant, u)
+    lin_states[:,i] = lin_states[:,i-1] + linmodel.A * (lin_states[:,i-1] .- linmodel.xop) + linmodel.Bu * (u .- linmodel.uop)
     
-    # Update linearized model
-    if i == 1 # || mod(i, 20) == 0
-        linmodel = ModelPredictiveControl.linearize(model; u=u, x=nonlin_states[:,i])
-    end
-    if i > 1
-        lin_states[:,i] = linmodel.A * lin_states[:,i-1] + linmodel.Bu * u
-    end
-    
-    times[i] = t
     t += dt
+    times[i] = t
 end
 
 # Plot results
