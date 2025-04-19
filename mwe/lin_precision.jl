@@ -6,34 +6,26 @@ ad_type = AutoFiniteDiff()
 
 # Simulation parameters
 dt = 0.05
-total_time = 0.2
+total_time = 1.0
 steps = Int(round(total_time / dt))
 
 # Initialize model
 set_data_path(joinpath(@__DIR__, "../data"))
-set = se("system_model.yaml")
-set.segments = 2
-set.quasi_static = true
-set.bridle_fracs = [0.0, 0.93]
-set.physical_model = "simple_ram"
+set_model = deepcopy(se("system_model.yaml"))
+dt = 1/set_model.sample_freq
+s = RamAirKite(set_model)
+
+set_plant = deepcopy(se("system_plant.yaml"))
+s_plant = RamAirKite(set_plant)
 
 # Create models (nonlinear and plant)
-function create_models()
-    s = RamAirKite(set)
-    s_plant = RamAirKite(deepcopy(set))
-    
-    measure = Measurement()
-    measure.set_values .= [-55, -4.0, -4.0]
-    measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
-    
-    KiteModels.init_sim!(s, measure; remake=false)
-    KiteModels.init_sim!(s_plant, measure; remake=false)
-    
-    return s, s_plant
-end
+measure = Measurement()
+measure.set_values .= [-55, -4.0, -4.0]
+measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 
-# Create models and get parameters
-s, s_plant = create_models()
+KiteModels.init_sim!(s, measure; remake=false)
+KiteModels.init_sim!(s_plant, measure; remake=false)
+
 sys = s.sys
 
 # Setup model parameters
@@ -61,18 +53,7 @@ function f(x, u, _, p)
     set_x(s.prob, x)
     set_u(s.prob, u)
     sol = solve(s.prob, solver; dt, abstol=s.set.abs_tol, reltol=s.set.rel_tol, save_on=false, save_everystep=false, save_start=false, verbose=false)
-    @info "Input $(u[2]) results in $(sol[s.sys.tether_vel[2]][end])"
     return get_x(sol)[1]
-end
-
-# Function to step simulation with input u
-function f_integ(x, u, _, p)
-    (s, set_x, set_u, get_x, get_y, dt, set_xh) = p
-    set_xh(s.integrator, x)
-    set_u(s.integrator, u)
-    OrdinaryDiffEq.reinit!(s.integrator, s.integrator.u; reinit_dae=true)
-    OrdinaryDiffEq.step!(s.integrator, dt)
-    return get_x(s.integrator)
 end
 
 function h(x, _, p)
@@ -113,12 +94,13 @@ linmodel = ModelPredictiveControl.linearize(model; u=u0, x=x0)
 for i in 2:steps
     global linmodel, t
     # Calculate inputs
-    u = [-100, -100, -100]
+    u = [-20, -1, -1]
     
     # Update states
     nonlin_states[:,i] = updatestate!(model, u)
     plant_states[:,i] = updatestate!(plant, u)
-    lin_states[:,i] = lin_states[:,i-1] + linmodel.A * (lin_states[:,i-1] .- linmodel.xop) + linmodel.Bu * (u .- linmodel.uop)
+    lin_states[:,i] = updatestate!(linmodel, u)
+    linearize!(linmodel, model; u=u, x=lin_states[:,i-1])
     
     t += dt
     times[i] = t

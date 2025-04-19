@@ -9,7 +9,7 @@ using ControlPlots
 
 include(joinpath(@__DIR__, "plotting.jl"))
 
-ad_type = AutoFiniteDiff(relstep=0.01, absstep=0.01)
+ad_type = AutoFiniteDiff()
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
@@ -88,10 +88,7 @@ iter = 0
 function get_p(s)
     x_vec = KiteModels.get_unknowns(s)
     y_vec = [
-        x_vec
-        s.sys.angle_of_attack
-        s.sys.heading_x
-        s.sys.tether_acc
+        collect(s.sys.tether_vel)
     ]
     inputs = collect(s.sys.set_values)
     set_x = setu(s.integrator, Initial.(x_vec))
@@ -141,17 +138,14 @@ N = 90
 σQint_u = fill(0.1, nu)
 nint_u = fill(1, nu)
 
-plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 s_plant = p_plant[1]
 iter = 0
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
-Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
-Mwt[y_idx[sys.tether_length[1]]] = 1.0
-Mwt[y_idx[sys.heading_x]] = 1.0
-Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
+Hp, Hc, Mwt, Nwt = 20, 2, fill(1.0, ny), fill(1.0, nu)
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
@@ -206,8 +200,6 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
 end
 
 ry = p_model[5](s_model.integrator)
-ry[y_idx[sys.angle_of_attack]] = deg2rad(10)
-ry[y_idx[sys.heading_x]] = deg2rad(10)
 x̂0 = [
     x0
     p_model[5](s_model.integrator)
