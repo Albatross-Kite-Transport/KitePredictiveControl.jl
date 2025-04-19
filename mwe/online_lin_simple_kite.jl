@@ -9,7 +9,7 @@ using ControlPlots
 
 include(joinpath(@__DIR__, "plotting.jl"))
 
-ad_type = AutoFiniteDiff(relstep=0.1, absstep=0.1)
+ad_type = AutoFiniteDiff(relstep=0.01, absstep=0.01)
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
@@ -40,7 +40,6 @@ function stabilize!(s)
     for i in 1:10
         set_values = -s.set.drum_radius * s.integrator[s.sys.winch_force]
         KiteModels.next_step!(s, set_values; dt)
-        @show set_values
         # plot_kite(s, i-1)
     end
 end
@@ -73,9 +72,7 @@ end
 
 function f_plant(x, u, _, p)
     (s, _, _, get_x, _, dt, _) = p
-    @show u
     next_step!(s, u; dt)
-    @show s.integrator[s.sys.tether_length[1]]
     return get_x(s.integrator)
 end
 
@@ -130,12 +127,11 @@ vx = string.(x_vec)
 vu = string.(inputs)
 vy = string.(y_vec)
 model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-s_model = p_model[1]
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0]
-N = 20
+N = 90
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
@@ -145,17 +141,17 @@ N = 20
 σQint_u = fill(0.1, nu)
 nint_u = fill(1, nu)
 
-plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 s_plant = p_plant[1]
 iter = 0
 # estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
-Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(0.1, nu)
-Mwt[y_idx[sys.tether_vel[1]]] = 1.0
-# Mwt[y_idx[sys.heading_x]] = 1.0
-# Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
+Hp, Hc, Mwt, Nwt = 20, 2, zeros(ny), fill(1.0, nu)
+Mwt[y_idx[sys.tether_length[1]]] = 1.0
+Mwt[y_idx[sys.heading_x]] = 1.0
+Mwt[y_idx[sys.angle_of_attack[1]]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
@@ -165,7 +161,7 @@ umin, umax = [-100, -20, -20], [0, 0, 0]
 ymin, ymax = fill(-Inf, ny), fill(Inf, ny)
 [ymin[y_idx[sys.tether_acc[i]]] = -10.0 for i in 1:3]
 [ymax[y_idx[sys.tether_acc[i]]] = 10.0 for i in 1:3]
-Δumin, Δumax = fill(-1, nu), fill(1, nu)
+Δumin, Δumax = [-10,-1,-1], [10,1,1]
 
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
@@ -211,6 +207,7 @@ end
 
 ry = p_model[5](s_model.integrator)
 ry[y_idx[sys.angle_of_attack]] = deg2rad(10)
+ry[y_idx[sys.heading_x]] = deg2rad(10)
 x̂0 = [
     x0
     p_model[5](s_model.integrator)
