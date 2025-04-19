@@ -4,7 +4,7 @@ Use a nonlinear MTK model with online linearization and a linear MPC using Model
 
 using KiteModels, KiteUtils, LinearAlgebra
 using ModelPredictiveControl, ModelingToolkit, Plots, JuMP, Ipopt, OrdinaryDiffEq, FiniteDiff, DifferentiationInterface
-using ModelingToolkit: D_nounits as D, t_nounits as t, setu, setp, getu, getp
+using ModelingToolkit: setu, setp, getu, getp
 using ControlPlots
 
 include(joinpath(@__DIR__, "plotting.jl"))
@@ -87,9 +87,7 @@ end
 iter = 0
 function get_p(s)
     x_vec = KiteModels.get_unknowns(s)
-    y_vec = [
-        collect(s.sys.tether_vel)
-    ]
+    y_vec = collect(s.sys.tether_vel)
     inputs = collect(s.sys.set_values)
     set_x = setu(s.integrator, Initial.(x_vec))
     set_xh = setu(s.integrator, x_vec)
@@ -128,7 +126,7 @@ setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0]
-N = 90
+N = 50
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
@@ -145,65 +143,64 @@ iter = 0
 # res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
 # plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
-Hp, Hc, Mwt, Nwt = 20, 2, fill(1.0, ny), fill(1.0, nu)
+Hp, Hc, Mwt, Nwt = 20, 2, fill(1.0, ny), fill(10.0, nu)
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
 display(linmodel.A); display(linmodel.Bu)
 
 umin, umax = [-100, -20, -20], [0, 0, 0]
-ymin, ymax = fill(-Inf, ny), fill(Inf, ny)
-[ymin[y_idx[sys.tether_acc[i]]] = -10.0 for i in 1:3]
-[ymax[y_idx[sys.tether_acc[i]]] = 10.0 for i in 1:3]
 Δumin, Δumax = [-10,-1,-1], [10,1,1]
 
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
-function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
-    U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
-    setstate!(plant, x0)
-    initstate!(mpc, u0, plant())
-    setstate!(mpc, x̂_0)
-    for i = 1:N
-        t = @elapsed begin
-            
-            y = plant() + y_step
-            x̂ = preparestate!(mpc, y)
-            u = moveinput!(mpc, ry)
-            
-            vsm_y = s_plant.get_y(s_plant.integrator) # TODO: use model
-            vsm_jac, vsm_x = VortexStepMethod.linearize(
-                s_model.vsm_solver, 
-                s_model.aero, 
-                vsm_y;
-                va_idxs=1:3, 
-                omega_idxs=4:6,
-                theta_idxs=7:6+length(s_model.point_system.groups),
-                moment_frac=s_model.bridle_fracs[s_model.point_system.groups[1].fixed_index])
-            s_model.set_vsm(s_model.prob, [vsm_x, vsm_y, vsm_jac])
-            s_plant.set_vsm(s_plant.integrator, [vsm_x, vsm_y, vsm_jac])
+include("plot_lin_precision.jl")
 
-            linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
-            setmodel!(mpc, linmodel)
+# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
+#     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
+#     setstate!(plant, x0)
+#     initstate!(mpc, u0, plant())
+#     setstate!(mpc, x̂_0)
+#     for i = 1:N
+#         t = @elapsed begin
             
-            U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
-            updatestate!(mpc, u, y) # update mpc state estimate
-        end
-        plot_kite(s_plant, i-1)
-        updatestate!(plant, u)  # update plant simulator
-        println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)).")
-    end
-    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data)
-    return res
-end
+#             y = plant() + y_step
+#             x̂ = preparestate!(mpc, y)
+#             u = moveinput!(mpc, ry)
+            
+#             vsm_y = s_plant.get_y(s_plant.integrator) # TODO: use model
+#             vsm_jac, vsm_x = VortexStepMethod.linearize(
+#                 s_model.vsm_solver, 
+#                 s_model.aero, 
+#                 vsm_y;
+#                 va_idxs=1:3, 
+#                 omega_idxs=4:6,
+#                 theta_idxs=7:6+length(s_model.point_system.groups),
+#                 moment_frac=s_model.bridle_fracs[s_model.point_system.groups[1].fixed_index])
+#             s_model.set_vsm(s_model.prob, [vsm_x, vsm_y, vsm_jac])
+#             s_plant.set_vsm(s_plant.integrator, [vsm_x, vsm_y, vsm_jac])
 
-ry = p_model[5](s_model.integrator)
-x̂0 = [
-    x0
-    p_model[5](s_model.integrator)
-]
-res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
-y_idxs = findall(x -> x != 0.0, Mwt)
-Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
+#             linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
+#             setmodel!(mpc, linmodel)
+            
+#             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
+#             updatestate!(mpc, u, y) # update mpc state estimate
+#         end
+#         plot_kite(s_plant, i-1)
+#         updatestate!(plant, u)  # update plant simulator
+#         println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)).")
+#     end
+#     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data)
+#     return res
+# end
+
+# ry = p_model[5](s_model.integrator)
+# x̂0 = [
+#     x0
+#     p_model[5](s_model.integrator)
+# ]
+# res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
+# y_idxs = findall(x -> x != 0.0, Mwt)
+# Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
