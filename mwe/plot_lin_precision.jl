@@ -24,6 +24,7 @@ for i in 2:N
     
     # Update states
     nonlin_states[:,i] = updatestate!(model, u)
+    p_model.sx .= p_model.get_sx(p_model.integ)
     plant_states[:,i] = updatestate!(plant, u)
     lin_states[:,i] = updatestate!(linmodel, u)
     linearize!(linmodel, model; u=u, x=lin_states[:,i-1])
