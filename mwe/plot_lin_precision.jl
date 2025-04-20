@@ -4,8 +4,8 @@ setstate!(model, x0)
 setstate!(plant, x0)
 
 # Storage for states
-nonlin_states = zeros(nx, N)
-plant_states = zeros(nx, N)
+nonlin_states = fill(NaN, nx, N)
+plant_states = fill(NaN, nx, N)
 lin_states = fill(NaN, nx, N)
 times = zeros(N)
 nonlin_states[:,1] .= x0

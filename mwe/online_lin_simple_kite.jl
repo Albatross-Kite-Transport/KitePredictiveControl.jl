@@ -44,11 +44,12 @@ function f(x, u, _, p)
     p.set_u(p.integ, u)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     OrdinaryDiffEq.step!(p.integ, p.dt)
+    # xnext = p.get_x(p.integ)
     return p.get_x(p.integ)
 end
 
 function f_plant(x, u, _, p)
-    next_step!(p.s, u; p.dt)
+    next_step!(p.s, u; p.dt, vsm_interval=0)
     return p.get_x(p.integ)
 end
 
