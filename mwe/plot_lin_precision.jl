@@ -20,7 +20,7 @@ linmodel = ModelPredictiveControl.linearize(model; u=u0, x=x0)
 for i in 2:N
     global linmodel, t, u
     # Calculate inputs
-    u = [-20, -1, -1]
+    u = u0 .- 10.0
     
     # Update states
     nonlin_states[:,i] = updatestate!(model, u)

@@ -12,7 +12,7 @@ using ControlPlots
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 include(joinpath(@__DIR__, "plotting.jl"))
 
-ad_type = AutoFiniteDiff(absstep=0.1, relstep=0.1)
+ad_type = AutoFiniteDiff(absstep=0.01, relstep=0.01)
 
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
@@ -44,13 +44,16 @@ function f(x, u, _, p)
     p.set_u(p.integ, u)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     OrdinaryDiffEq.step!(p.integ, p.dt)
-    # xnext = p.get_x(p.integ)
-    return p.get_x(p.integ)
+    xnext = p.get_x(p.integ)
+    !successful_retcode(p.integ.sol) && (xnext .= NaN)
+    return xnext
 end
 
 function f_plant(x, u, _, p)
     next_step!(p.s, u; p.dt, vsm_interval=0)
-    return p.get_x(p.integ)
+    xnext = p.get_x(p.integ)
+    !successful_retcode(p.integ.sol) && (xnext .= NaN)
+    return xnext
 end
 
 function h(x, _, p)
