@@ -10,7 +10,8 @@ using SciMLBase: successful_retcode
 using ControlPlots
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
-include(joinpath(@__DIR__, "plotting.jl"))
+include("plotting.jl")
+include("plot_lin_precision.jl")
 
 ad_type = AutoFiniteDiff(absstep=1e-5, relstep=1e-5)
 u_idxs = [1]
@@ -25,8 +26,9 @@ dt = 1/set_model.sample_freq
 measure = Measurement()
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
-KiteModels.init_sim!(s_plant, measure; remake=false)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
+KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=false)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
+OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
 sys = s_model.sys
 
 function stabilize!(s)
@@ -52,17 +54,7 @@ function f(x, u, _, p)
     p.set_x(p.integ, x)
     p.set_sx(p.integ, p.sx)
     p.set_u(p.integ, u)
-    OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
-    OrdinaryDiffEq.step!(p.integ, p.dt)
-    xnext = p.get_x(p.integ)
-    !successful_retcode(p.integ.sol) && (xnext .= NaN)
-    return xnext
-end
-
-function f_plant(x, u, _, p)
-    p.set_x(p.integ, x)
-    p.set_u(p.integ, u)
-    OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
+    OrdinaryDiffEq.set_t!(p.integ, 0.0)
     OrdinaryDiffEq.step!(p.integ, p.dt)
     xnext = p.get_x(p.integ)
     !successful_retcode(p.integ.sol) && (xnext .= NaN)
@@ -116,18 +108,21 @@ p_plant = ModelParams(s_plant)
 nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 
 x0 = p_model.get_x(s_model.integrator)
+sx0 = p_model.get_sx(s_model.integrator)
 u0 = [-s_model.set.drum_radius * s_model.integrator[sys.winch_force][1]] .+ 10
 
-# norms = Float64[]
-# for x in [x0, x0 .+ 0.01]
-#     for u in [[-50, 0, 0], [-50, -1, -1]]
-#         xnext = f(x, u, nothing, p_model)
-#         push!(norms, norm(xnext))
-#         ynext = h(xnext, nothing, p_model)
-#         @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
-#     end
-# end
-# @assert length(unique(norms)) == length(norms) "Different inputs/states should produce different outputs"
+norms = Float64[]
+for x in [x0, x0 .+ 0.01]
+    for u in [[-50, 0, 0], [-51, -1, -1]]
+        for _ in 1:2
+            xnext = f(x, u, nothing, p_model)
+            push!(norms, norm(xnext))
+            ynext = h(xnext, nothing, p_model)
+            # @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
+        end
+    end
+end
+@assert length(unique(norms))*2 == length(norms) "Different inputs/states should produce different outputs"
 
 x_idx = Dict{Num, Int}()
 for (idx, sym) in enumerate(p_model.x_vec)
@@ -150,7 +145,7 @@ N = 20
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
-plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
+plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
 Hp, Hc, Mwt, Nwt = 2, 1, fill(1.0, ny), fill(0.1, nu)
 # Mwt[y_idx[sys.tether_length[1]]] = 0.01
@@ -170,7 +165,7 @@ estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
-include("plot_lin_precision.jl")
+plot_lin_precision()
 
 # function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
 #     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
