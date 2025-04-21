@@ -14,7 +14,7 @@ include("plotting.jl")
 include("plot_lin_precision.jl")
 
 ad_type = AutoFiniteDiff(absstep=1e-5, relstep=1e-5)
-u_idxs = [1]
+u_idxs = [1,2,3]
 
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
@@ -68,7 +68,7 @@ function h(x, _, p)
 end
 
 # Get initial state
-struct ModelParams
+struct ModelParams{G}
     s::RamAirKite
     integ::OrdinaryDiffEq.ODEIntegrator
     set_x::SymbolicIndexingInterface.MultipleSetters
@@ -78,7 +78,7 @@ struct ModelParams
     set_u::SymbolicIndexingInterface.MultipleSetters
     get_x::SymbolicIndexingInterface.MultipleGetters
     get_sx::SymbolicIndexingInterface.MultipleGetters
-    get_y::SymbolicIndexingInterface.MultipleGetters
+    get_y::G
     dt::Float64
 
     x_vec::Vector{Num}
@@ -88,7 +88,12 @@ struct ModelParams
     function ModelParams(s)
         x_vec = KiteModels.get_nonstiff_unknowns(s)
         sx_vec = KiteModels.get_stiff_unknowns(s)
-        y_vec = [s.sys.tether_length[1]]
+        # y_vec = [
+        #     [s.sys.tether_length[i] for i in 1:3]
+        #     s.sys.elevation
+        #     s.sys.azimuth
+        # ]
+        y_vec = x_vec
         u_vec = [s.sys.set_values[u_idxs[i]] for i in eachindex(u_idxs)]
 
         set_x = setu(s.integrator, x_vec)
@@ -99,7 +104,7 @@ struct ModelParams
         get_sx = getu(s.integrator, sx_vec)
         get_y = getu(s.integrator, y_vec)
         sx = get_sx(s.integrator)
-        return new(s, s.integrator, set_x, set_ix, set_sx, sx, set_u, get_x, get_sx, get_y, dt, x_vec, sx_vec, y_vec, u_vec)
+        return new{typeof(get_y)}(s, s.integrator, set_x, set_ix, set_sx, sx, set_u, get_x, get_sx, get_y, dt, x_vec, sx_vec, y_vec, u_vec)
     end
 end
 
@@ -109,7 +114,7 @@ nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 
 x0 = p_model.get_x(s_model.integrator)
 sx0 = p_model.get_sx(s_model.integrator)
-u0 = [-s_model.set.drum_radius * s_model.integrator[sys.winch_force][1]] .+ 10
+u0 = -s_model.set.drum_radius * s_model.integrator[sys.winch_force][u_idxs]
 
 norms = Float64[]
 for x in [x0, x0 .+ 0.01]
@@ -141,23 +146,26 @@ setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0][u_idxs]
-N = 10
+N = 15
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 3, 1, fill(1.0, ny), fill(0.1, nu)
-# Mwt[y_idx[sys.tether_length[1]]] = 0.01
-# Mwt[y_idx[sys.tether_length[2]]] = 1.0
-# Mwt[y_idx[sys.tether_length[3]]] = 1.0
+Hp, Hc, Mwt, Nwt = 3, 1, fill(0.0, ny), fill(0.01, nu)
+Mwt[y_idx[sys.tether_length[1]]] = 1.0
+Mwt[y_idx[sys.tether_length[2]]] = 1.0
+Mwt[y_idx[sys.tether_length[3]]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
 display(linmodel.A); display(linmodel.Bu)
 
+# Parameter	Higher Value Means	        Lower Value Means
+# Q	        Less trust in model	        More trust in model
+# R	        Less trust in measurements	More trust in measurements
 σR = fill(0.001, ny)
-σQ = fill(0.001, nx)
+σQ = fill(1.0, nx)
 σQint_u = fill(0.1, nu)
 nint_u = fill(1, nu)
 umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
