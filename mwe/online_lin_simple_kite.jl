@@ -12,7 +12,8 @@ using ControlPlots
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 include(joinpath(@__DIR__, "plotting.jl"))
 
-ad_type = AutoFiniteDiff(absstep=0.01, relstep=0.01)
+ad_type = AutoFiniteDiff(absstep=1e-5, relstep=1e-5)
+u_idxs = [1]
 
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
@@ -23,9 +24,18 @@ dt = 1/set_model.sample_freq
 
 measure = Measurement()
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
-KiteModels.init_sim!(s_model, measure; remake=false)
+KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
 sys = s_model.sys
+
+function stabilize!(s)
+    s.integrator.ps[sys.steady] = true
+    next_step!(s; dt=10.0, vsm_interval=1)
+    s.integrator.ps[sys.steady] = false
+end
+stabilize!(s_model)
+stabilize!(s_plant)
 
 """
 current problem: initialization works only at x0
@@ -50,7 +60,10 @@ function f(x, u, _, p)
 end
 
 function f_plant(x, u, _, p)
-    next_step!(p.s, u; p.dt, vsm_interval=0)
+    p.set_x(p.integ, x)
+    p.set_u(p.integ, u)
+    OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
+    OrdinaryDiffEq.step!(p.integ, p.dt)
     xnext = p.get_x(p.integ)
     !successful_retcode(p.integ.sol) && (xnext .= NaN)
     return xnext
@@ -83,8 +96,8 @@ struct ModelParams
     function ModelParams(s)
         x_vec = KiteModels.get_nonstiff_unknowns(s)
         sx_vec = KiteModels.get_stiff_unknowns(s)
-        y_vec = collect(s.sys.tether_length)
-        u_vec = collect(s.sys.set_values)
+        y_vec = [s.sys.tether_length[1]]
+        u_vec = [s.sys.set_values[u_idxs[i]] for i in eachindex(u_idxs)]
 
         set_x = setu(s.integrator, x_vec)
         set_ix = setu(s.integrator, Initial.(x_vec))
@@ -100,21 +113,21 @@ end
 
 p_model = ModelParams(s_model)
 p_plant = ModelParams(s_plant)
+nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 
 x0 = p_model.get_x(s_model.integrator)
-u0 = -s_model.set.drum_radius * s_model.integrator[sys.winch_force]
+u0 = [-s_model.set.drum_radius * s_model.integrator[sys.winch_force][1]] .+ 10
 
-nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
-norms = Float64[]
-for x in [x0, x0 .+ 0.01]
-    for u in [[-50, 0, 0], [-50, -1, -1]]
-        xnext = f(x, u, nothing, p_model)
-        push!(norms, norm(xnext))
-        ynext = h(xnext, nothing, p_model)
-        @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
-    end
-end
-@assert length(unique(norms)) == length(norms) "Different inputs/states should produce different outputs"
+# norms = Float64[]
+# for x in [x0, x0 .+ 0.01]
+#     for u in [[-50, 0, 0], [-50, -1, -1]]
+#         xnext = f(x, u, nothing, p_model)
+#         push!(norms, norm(xnext))
+#         ynext = h(xnext, nothing, p_model)
+#         @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
+#     end
+# end
+# @assert length(unique(norms)) == length(norms) "Different inputs/states should produce different outputs"
 
 x_idx = Dict{Num, Int}()
 for (idx, sym) in enumerate(p_model.x_vec)
@@ -132,66 +145,60 @@ model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, ja
 setstate!(model, x0)
 # setop!(model; xop=x0)
 
-u = [-50, -5, 0]
-N = 50
+u = [-50, -5, 0][u_idxs]
+N = 20
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
-α=0.01
-σR = fill(0.01, ny)
-σQ = fill(0.01, nx)
-σQint_u = fill(0.1, nu)
-nint_u = fill(1, nu)
-
 plant = setname!(NonLinModel(f_plant, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-# estim = UnscentedKalmanFilter(model; α, σQ, σR, nint_u, σQint_u)
-# res = sim!(estim, N, [-50, -0.1, -0.1]; x_0=x0, plant=plant, y_noise=fill(0.01, ny))
-# plot(res; plotx=false, ploty=[11,12,13,14,15,16,17], plotu=false, plotxwithx̂=false, size=(900, 900))
 
 Hp, Hc, Mwt, Nwt = 2, 1, fill(1.0, ny), fill(0.1, nu)
+# Mwt[y_idx[sys.tether_length[1]]] = 0.01
+# Mwt[y_idx[sys.tether_length[2]]] = 1.0
+# Mwt[y_idx[sys.tether_length[3]]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
 display(linmodel.A); display(linmodel.Bu)
 
-umin, umax = [-100, -20, -20], [0, 0, 0]
-Δumin, Δumax = [-10,-1,-1], [10,1,1]
-
+σR = fill(0.001, ny)
+σQ = fill(0.001, nx)
+σQint_u = fill(0.1, nu)
+nint_u = fill(1, nu)
+umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
 include("plot_lin_precision.jl")
 
-# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂_0, y_step=zeros(ny))
+# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
 #     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
 #     setstate!(plant, x0)
 #     initstate!(mpc, u0, plant())
-#     setstate!(mpc, x̂_0)
+#     setstate!(mpc, x̂0)
 #     for i = 1:N
 #         t = @elapsed begin
-            
 #             y = plant() + y_step
 #             x̂ = preparestate!(mpc, y)
 #             u = moveinput!(mpc, ry)
             
-#             vsm_y = s_plant.get_y(s_plant.integrator) # TODO: use model
-#             vsm_jac, vsm_x = VortexStepMethod.linearize(
-#                 s_model.vsm_solver, 
-#                 s_model.aero, 
-#                 vsm_y;
-#                 va_idxs=1:3, 
-#                 omega_idxs=4:6,
-#                 theta_idxs=7:6+length(s_model.point_system.groups),
-#                 moment_frac=s_model.bridle_fracs[s_model.point_system.groups[1].fixed_index])
-#             s_model.set_vsm(s_model.prob, [vsm_x, vsm_y, vsm_jac])
-#             s_plant.set_vsm(s_plant.integrator, [vsm_x, vsm_y, vsm_jac])
-
-#             linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
-#             setmodel!(mpc, linmodel)
+#             KiteModels.linearize_vsm!(s_model)
+#             KiteModels.linearize_vsm!(s_plant)
             
+#             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
+#             setmodel!(mpc, linmodel)
+#             @show linmodel.Bu[x_idx[sys.tether_vel[1]]]
+
 #             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
 #             updatestate!(mpc, u, y) # update mpc state estimate
+
+#             # # update stiff unknowns
+#             # setstate!(nonlinmodel, x̂[1:length(x0)])
+#             # updatestate!(nonlinmodel, u)
+#             p_model.sx .= p_model.get_sx(p_model.integ)
+
+
 #         end
 #         plot_kite(s_plant, i-1)
 #         updatestate!(plant, u)  # update plant simulator
@@ -201,11 +208,11 @@ include("plot_lin_precision.jl")
 #     return res
 # end
 
-# ry = p_model[5](s_model.integrator)
+# ry = p_model.get_y(s_model.integrator)
 # x̂0 = [
 #     x0
-#     p_model[5](s_model.integrator)
+#     p_model.get_y(s_model.integrator)
 # ]
 # res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
 # y_idxs = findall(x -> x != 0.0, Mwt)
-# Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=false, plotu=true, size=(900, 900))
+# Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=[x_idx[sys.tether_length[i]] for i in 1:3], plotu=true, size=(900, 900))

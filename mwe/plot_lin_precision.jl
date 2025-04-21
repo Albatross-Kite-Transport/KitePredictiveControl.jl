@@ -20,14 +20,19 @@ linmodel = ModelPredictiveControl.linearize(model; u=u0, x=x0)
 for i in 2:N
     global linmodel, t, u
     # Calculate inputs
-    u = u0 .- 10.0
+    u = u0 .+ 10.0
     
     # Update states
     nonlin_states[:,i] = updatestate!(model, u)
-    p_model.sx .= p_model.get_sx(p_model.integ)
     plant_states[:,i] = updatestate!(plant, u)
     lin_states[:,i] = updatestate!(linmodel, u)
-    linearize!(linmodel, model; u=u, x=lin_states[:,i-1])
+
+    p_model.sx .= p_model.get_sx(p_model.integ)
+    KiteModels.linearize_vsm!(s_model)
+    KiteModels.linearize_vsm!(s_plant)
+    if i % 10 == 0
+        linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
+    end
     
     t += dt
     times[i] = t
