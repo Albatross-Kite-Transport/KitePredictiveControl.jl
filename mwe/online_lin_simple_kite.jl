@@ -27,8 +27,8 @@ measure = Measurement()
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=false)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
-OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.01dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
+OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
 sys = s_model.sys
 
 function stabilize!(s)
@@ -146,13 +146,13 @@ setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0][u_idxs]
-N = 15
+N = 100
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 3, 1, fill(0.0, ny), fill(0.01, nu)
+Hp, Hc, Mwt, Nwt = 20, 1, fill(0.0, ny), fill(0.01, nu)
 Mwt[y_idx[sys.tether_length[1]]] = 1.0
 Mwt[y_idx[sys.tether_length[2]]] = 1.0
 Mwt[y_idx[sys.tether_length[3]]] = 1.0
