@@ -1,25 +1,18 @@
 
+function reset_p!(p, sx0, x0=nothing)
+    # Initialize states
+    p.sx .= sx0
+    !isnothing(x0) && p.set_x(p.integ, x0) # needs x0 for vsm linearization
+    p.set_sx(p.integ, sx0)
+    KiteModels.linearize_vsm!(p.s)
+    return nothing
+end
+
 function plot_lin_precision()
     # Initialize states
-    p_model.sx .= sx0
-    p_model.set_x(p_model.integ, x0)
-    p_model.set_sx(p_model.integ, sx0)
-    # OrdinaryDiffEq.reinit!(p_model.integ, p_model.integ.u; reinit_dae=true)
-    
-    p_plant.sx .= sx0
-    p_plant.set_x(p_plant.integ, x0)
-    p_plant.set_sx(p_plant.integ, sx0)
-    # OrdinaryDiffEq.reinit!(p_plant.integ, p_plant.integ.u; reinit_dae=true)
+    reset_p!(p_model, sx0, x0)
+    reset_p!(p_plant, sx0, x0)
 
-    @show norm(p_model.integ.u)
-    @show norm(p_plant.integ.u)
-    @show norm(p_model.get_sx(p_model.integ)) norm(p_model.get_x(p_model.integ))
-    step!(p_model.integ, 1e-3)
-    @show norm(p_model.get_sx(p_model.integ)) norm(p_model.get_x(p_model.integ))
-    
-    KiteModels.linearize_vsm!(s_model)
-    KiteModels.linearize_vsm!(s_plant)
-    
     setstate!(model, x0)
     setstate!(plant, x0)
     

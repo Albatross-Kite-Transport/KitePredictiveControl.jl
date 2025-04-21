@@ -27,8 +27,8 @@ measure = Measurement()
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=false)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
-OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
+OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.01dt)
 sys = s_model.sys
 
 function stabilize!(s)
@@ -141,13 +141,13 @@ setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0][u_idxs]
-N = 20
+N = 10
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 2, 1, fill(1.0, ny), fill(0.1, nu)
+Hp, Hc, Mwt, Nwt = 3, 1, fill(1.0, ny), fill(0.1, nu)
 # Mwt[y_idx[sys.tether_length[1]]] = 0.01
 # Mwt[y_idx[sys.tether_length[2]]] = 1.0
 # Mwt[y_idx[sys.tether_length[3]]] = 1.0
@@ -165,49 +165,56 @@ estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
-plot_lin_precision()
+# plot_lin_precision()
 
-# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
-#     U_data, Y_data, Ry_data, X̂_data = zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N)
-#     setstate!(plant, x0)
-#     initstate!(mpc, u0, plant())
-#     setstate!(mpc, x̂0)
-#     for i = 1:N
-#         t = @elapsed begin
-#             y = plant() + y_step
-#             x̂ = preparestate!(mpc, y)
-#             u = moveinput!(mpc, ry)
+function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
+    U_data, Y_data, Ry_data, X̂_data, X_data = 
+        zeros(plant.nu, N), zeros(plant.ny, N), zeros(plant.ny, N), zeros(plant.nx, N), zeros(plant.nx, N)
+    setstate!(plant, x0)
+    initstate!(mpc, u0, plant())
+    setstate!(mpc, x̂0)
+    for i = 1:N
+        t = @elapsed begin
+            y = plant() + y_step
+            x̂ = preparestate!(mpc, y)
+            u = moveinput!(mpc, ry)
             
-#             KiteModels.linearize_vsm!(s_model)
-#             KiteModels.linearize_vsm!(s_plant)
-            
-#             linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
-#             setmodel!(mpc, linmodel)
-#             @show linmodel.Bu[x_idx[sys.tether_vel[1]]]
+            sx0, x0 = p_model.get_sx(p_model.integ), x̂[1:length(x0)]
+            reset_p!(p_model, sx0, x0)
+            reset_p!(p_plant, sx0)
+            # setstate!(model, x0)
+            # setstate!(plant, x0)        
 
-#             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
-#             updatestate!(mpc, u, y) # update mpc state estimate
+            linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
+            @show norm(linmodel.A)
+            setmodel!(mpc, linmodel)
+            @show linmodel.Bu[x_idx[sys.tether_vel[1]]]
 
-#             # # update stiff unknowns
-#             # setstate!(nonlinmodel, x̂[1:length(x0)])
-#             # updatestate!(nonlinmodel, u)
-#             p_model.sx .= p_model.get_sx(p_model.integ)
+            U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
+            updatestate!(mpc, u, y) # update mpc state estimate
+        end
+        plot_kite(s_plant, i-1)
+        updatestate!(plant, u)  # update plant simulator
+        X_data[:,i] .= plant.x0
+        println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)). Norm Bu: $(norm(linmodel.Bu)). Norm vsm_jac: $(norm(s_model.prob.ps[sys.vsm_jac]))")
+    end
+    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
+    return res
+end
 
+ry = p_model.get_y(s_model.integrator)
+x̂0 = [
+    x0
+    p_model.get_y(s_model.integrator)
+]
+res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
+y_idxs = findall(x -> x != 0.0, Mwt)
+Plots.plot(res; plotx=false, ploty=y_idxs, 
+    plotxwithx̂=[
+        [x_idx[sys.tether_length[i]] for i in 1:3]
+        [x_idx[sys.Q_b_w[i]] for i in 1:4]
+    ], 
+    plotu=true, size=(900, 900)
+)
 
-#         end
-#         plot_kite(s_plant, i-1)
-#         updatestate!(plant, u)  # update plant simulator
-#         println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)). Norm Bu: $(norm(linmodel.Bu)). Norm vsm_jac: $(norm(s_model.prob.ps[sys.vsm_jac]))")
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data)
-#     return res
-# end
-
-# ry = p_model.get_y(s_model.integrator)
-# x̂0 = [
-#     x0
-#     p_model.get_y(s_model.integrator)
-# ]
-# res = sim_adapt!(mpc, model, N, ry, plant, x0, x̂0)
-# y_idxs = findall(x -> x != 0.0, Mwt)
-# Plots.plot(res; plotx=false, ploty=y_idxs, plotxwithx̂=[x_idx[sys.tether_length[i]] for i in 1:3], plotu=true, size=(900, 900))
+# plot_lin_precision()
