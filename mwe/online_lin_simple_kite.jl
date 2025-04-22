@@ -27,7 +27,7 @@ measure = Measurement()
 measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=true)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.05dt)
 OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
 sys = s_model.sys
 
@@ -40,16 +40,10 @@ stabilize!(s_model)
 stabilize!(s_plant)
 
 """
-current problem: initialization works only at x0
-solution: use dynamic model
-- initialize with acc = 0 for tether points at the start of each time step
-- reinit with reinit_dae=false inside discrete function
-
-The simplest way to get the stiff unknowns:
-- step model with the found inputs u to find the next step stiff unknowns
-- might be problematic if the model is way off the real system
+Use quick initialization model to extend the measurements for the kalman filter
 """
 
+# https://github.com/SciML/ModelingToolkit.jl/issues/3552#issuecomment-2817642041
 function f(x, u, _, p)
     p.set_x(p.integ, x)
     p.set_sx(p.integ, p.sx)
@@ -93,7 +87,7 @@ struct ModelParams{G}
         #     s.sys.elevation
         #     s.sys.azimuth
         # ]
-        y_vec = x_vec
+        y_vec = [KiteModels.get_nonstiff_unknowns(s; simple=true); s.sys.angle_of_attack]
         u_vec = [s.sys.set_values[u_idxs[i]] for i in eachindex(u_idxs)]
 
         set_x = setu(s.integrator, x_vec)
@@ -112,22 +106,7 @@ p_model = ModelParams(s_model)
 p_plant = ModelParams(s_plant)
 nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 
-x0 = p_model.get_x(s_model.integrator)
-sx0 = p_model.get_sx(s_model.integrator)
-u0 = -s_model.set.drum_radius * s_model.integrator[sys.winch_force][u_idxs]
-
-norms = Float64[]
-for x in [x0, x0 .+ 0.01]
-    for u in [[-50, 0, 0], [-51, -1, -1]]
-        for _ in 1:2
-            xnext = f(x, u, nothing, p_model)
-            push!(norms, norm(xnext))
-            ynext = h(xnext, nothing, p_model)
-            # @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
-        end
-    end
-end
-@assert length(unique(norms))*2 == length(norms) "Different inputs/states should produce different outputs"
+test_model(p_model)
 
 x_idx = Dict{Num, Int}()
 for (idx, sym) in enumerate(p_model.x_vec)
@@ -146,17 +125,16 @@ setstate!(model, x0)
 # setop!(model; xop=x0)
 
 u = [-50, -5, 0][u_idxs]
-N = 50
+N = 100
 # res = sim!(model, N, u; x_0=x0)
 # display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 10, 1, fill(0.0, ny), fill(0.01, nu)
+Hp, Hc, Mwt, Nwt = 30, 2, fill(0.0, ny), fill(1.0, nu)
 Mwt[y_idx[sys.tether_length[1]]] = 1.0
-Mwt[y_idx[sys.tether_length[2]]] = 1.0
-Mwt[y_idx[sys.tether_length[3]]] = 1.0
-Mwt[y_idx[sys.kite_pos[2]]] = 1.0
+Mwt[y_idx[sys.angle_of_attack]] = rad2deg(1.0)
+Mwt[y_idx[sys.kite_pos[2]]] = 0.1
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=x0, u=u0)
@@ -188,9 +166,10 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
             x̂ = preparestate!(mpc, y)
             u = moveinput!(mpc, ry)
             
-            sx0, x0 = p_model.get_sx(p_model.integ), x̂[1:length(x0)]
+            sx0, p_sx0, x0 = p_model.get_sx(p_model.integ), p_plant.get_sx(p_plant.integ), x̂[1:length(x0)]
             reset_p!(p_model, sx0, x0)
-            reset_p!(p_plant, sx0)
+            reset_p!(p_plant, p_sx0)
+            plot_kite(s_plant, i-1)
             # setstate!(model, x0)
             # setstate!(plant, x0)        
 
@@ -202,7 +181,6 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, x̂0, y_step=zeros(ny))
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
         end
-        plot_kite(s_plant, i-1)
         updatestate!(plant, u)  # update plant simulator
         X_data[:,i] .= plant.x0
         println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)). Norm Bu: $(norm(linmodel.Bu)). Norm vsm_jac: $(norm(s_model.prob.ps[sys.vsm_jac]))")
@@ -213,6 +191,7 @@ end
 
 ry = p_model.get_y(s_model.integrator)
 ry[y_idx[sys.kite_pos[2]]] = 1.0
+ry[y_idx[sys.angle_of_attack]] = deg2rad(20)
 
 x̂0 = [
     x0

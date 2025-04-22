@@ -1,4 +1,28 @@
 
+function test_model(p)
+    x0 = p.get_x(p.s.integrator)
+    sx0 = p.get_sx(p.s.integrator)
+    u0 = -p.s.set.drum_radius * p.s.integrator[sys.winch_force][u_idxs]
+
+    norms = Float64[]
+    for x in [x0, x0 .+ 0.01]
+        for u in [u0, u0 .+ 1.0]
+            for _ in 1:2
+                xnext = f(x, u, nothing, p)
+                xnext = f(x, u, nothing, p)
+                push!(norms, norm(xnext))
+                ynext = h(xnext, nothing, p)
+                # @info "x: $(norm(x)) u: $(norm(u)) xnext: $(norm(xnext)) ynext: $(norm(ynext))"
+            end
+        end
+    end
+    if length(unique(norms))*2 != length(norms) 
+        display(norms)
+        throw(ArgumentError("Different inputs/states should produce different outputs"))
+    end
+    nothing
+end
+
 function reset_p!(p, sx0, x0=nothing)
     # Initialize states
     p.sx .= sx0
