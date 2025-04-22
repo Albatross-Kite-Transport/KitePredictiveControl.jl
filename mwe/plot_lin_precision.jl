@@ -1,12 +1,8 @@
 
 function test_model(p)
-    x0 = p.get_x(p.s.integrator)
-    sx0 = p.get_sx(p.s.integrator)
-    u0 = -p.s.set.drum_radius * p.s.integrator[sys.winch_force][u_idxs]
-
     norms = Float64[]
-    for x in [x0, x0 .+ 0.01]
-        for u in [u0, u0 .+ 1.0]
+    for x in [p.x0, p.x0 .+ 0.01]
+        for u in [p.u0, p.u0 .+ 1.0]
             for _ in 1:2
                 xnext = f(x, u, nothing, p)
                 xnext = f(x, u, nothing, p)
@@ -23,40 +19,41 @@ function test_model(p)
     nothing
 end
 
-function reset_p!(p, sx0, x0=nothing)
-    # Initialize states
-    p.sx .= sx0
-    !isnothing(x0) && p.set_x(p.integ, x0) # needs x0 for vsm linearization
-    p.set_sx(p.integ, sx0)
-    KiteModels.linearize_vsm!(p.s)
+function reset_p!(p, x0)
+    p.sx0 .= p.get_sx(p.integ)
+    p.x0 .= x0
+    p.set_x(p.integ, p.x0) # needs x0 for vsm linearization
+    p.set_sx(p.integ, p.sx0)
     return nothing
 end
 
 function plot_lin_precision()
     # Initialize states
-    reset_p!(p_model, sx0, x0)
-    reset_p!(p_plant, sx0, x0)
+    reset_p!(p_model, p_model.x0)
+    reset_p!(p_plant, p_plant.x0)
+    KiteModels.linearize_vsm!(p_model.s)
+    KiteModels.linearize_vsm!(p_plant.s)
 
-    setstate!(model, x0)
-    setstate!(plant, x0)
+    setstate!(model, p_model.x0)
+    setstate!(plant, p_plant.x0)
     
     # Storage for states
-    nonlin_states = fill(NaN, nx, N)
-    plant_states = fill(NaN, nx, N)
-    lin_states = fill(NaN, nx, N)
+    nonlin_states = fill(NaN, model.nx, N)
+    plant_states = fill(NaN, plant.nx, N)
+    lin_states = fill(NaN, model.nx, N)
     times = zeros(N)
-    nonlin_states[:,1] .= x0
-    plant_states[:,1] .= x0
-    lin_states[:,1] .= x0
+    nonlin_states[:,1] .= p_model.x0
+    plant_states[:,1] .= p_plant.x0
+    lin_states[:,1] .= p_model.x0
     t = 0.0
     times[1] = t
     
-    linmodel = ModelPredictiveControl.linearize(model; u=u0, x=x0)
+    linmodel = ModelPredictiveControl.linearize(model; u=p_model.u0, x=p_model.x0)
 
     # Simulation loop
     for i in 2:N
         # Calculate inputs
-        u = u0 .+ 10.0
+        u = p_model.u0 .+ 10.0
         
         # Update states
         nonlin_states[:,i] = updatestate!(model, u)
@@ -67,9 +64,9 @@ function plot_lin_precision()
         p_plant.sx .= p_plant.get_sx(p_plant.integ)
         KiteModels.linearize_vsm!(s_model)
         KiteModels.linearize_vsm!(s_plant)
-        # if i % 10 == 0
-        #     linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
-        # end
+        if i % 10 == 0
+            linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
+        end
         
         t += dt
         times[i] = t
@@ -77,9 +74,9 @@ function plot_lin_precision()
 
     # Plot results
     p = plotx(times, 
-        [nonlin_states[5,:], plant_states[5,:], lin_states[5,:]],
-        [nonlin_states[7,:], plant_states[7,:], lin_states[7,:]],
-        [nonlin_states[9,:], plant_states[9,:], lin_states[9,:]];
+        [nonlin_states[5,:], plant_states[9,:], lin_states[5,:]],
+        [nonlin_states[7,:], plant_states[11,:], lin_states[7,:]],
+        [nonlin_states[9,:], plant_states[13,:], lin_states[9,:]];
         ylabels=["Tether length 1", "Tether length 2", "Tether length 3"],
         labels=[
             ["Nonlin", "Plant", "Linear"],
@@ -88,9 +85,4 @@ function plot_lin_precision()
         ],
         fig="Model Comparison")
     display(p)
-
-    # Print error metrics
-    nonlin_plant_error = norm(nonlin_states - plant_states) / N
-    nonlin_lin_error = norm(nonlin_states - lin_states) / N
-    @info "Model Comparison Errors:" nonlin_plant_error nonlin_lin_error
 end
