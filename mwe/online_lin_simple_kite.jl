@@ -8,13 +8,14 @@ using ModelPredictiveControl, ModelingToolkit, Plots, JuMP, Ipopt, OrdinaryDiffE
 using ModelingToolkit: setu, setp, getu, getp
 using SciMLBase: successful_retcode
 using ControlPlots
+using Printf
 
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 include("plotting.jl")
 include("plot_lin_precision.jl")
 
 ad_type = AutoFiniteDiff(absstep=1e-5, relstep=1e-5)
-N = 50
+N = 100
 u_idxs = [1,2,3]
 
 # Initialize model
@@ -141,10 +142,10 @@ nu, nx, ny = length(p_plant.u_vec), length(p_plant.x_vec), length(p_plant.y_vec)
 vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_vec)
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 30, 2, fill(0.0, model.ny), fill(10.0, model.nu)
+Hp, Hc, Mwt, Nwt = 20, 2, fill(0.0, model.ny), fill(1.0, model.nu)
 Mwt[p_model.y_idxs[sys.tether_length[1]]] = 1.0
-Mwt[p_model.y_idxs[sys.angle_of_attack]] = 1.0
-Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 0.1
+Mwt[p_model.y_idxs[sys.angle_of_attack]] = rad2deg(1.0)
+Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=p_model.x0, u=p_model.u0)
@@ -154,7 +155,7 @@ display(linmodel.A); display(linmodel.Bu)
 # R	        More trust in measurements	Less trust in measurements
 # Q	        More trust in model	        Less trust in model
 σR = fill(0.1, model.ny)
-σQ = fill(1, model.nx)
+σQ = fill(0.1, model.nx)
 σQint_u = fill(0.1, model.nu)
 nint_u = fill(1, model.nu)
 umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
@@ -174,6 +175,17 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
     setstate!(plant, px0)
     initstate!(mpc, p_model.u0, plant())
     setstate!(mpc, x̂0)
+    println("\nStarting simulation...")
+    println("─"^80)
+    println(
+        rpad("Step", 6),
+        rpad("Real-time", 12),
+        rpad("VSM", 12),
+        rpad("Lin", 12),
+        rpad("MPC", 12),
+        "Norm(A)"
+    )
+    println("─"^80)
     for i = 1:N
         t = @elapsed begin
             y = plant() + y_step
@@ -181,24 +193,31 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             u = moveinput!(mpc, ry)
             
             p_model.sx .= p_model.get_sx(p_model.integ)
-            KiteModels.linearize_vsm!(p_model.s)
+            vsm_t = @elapsed KiteModels.linearize_vsm!(p_model.s)
             
-            ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
+            smooth = 0.9
+            lin_t = @elapsed next_linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
+            @. linmodel.A = (1-smooth)*next_linmodel.A + smooth*linmodel.A
+            @. linmodel.Bu = (1-smooth)*next_linmodel.Bu + smooth*linmodel.Bu
+            @. linmodel.C = (1-smooth)*next_linmodel.C + smooth*linmodel.C
+            # ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
+
             if !(any(isnan.(linmodel.A)) || any(isnan.(linmodel.Bu)))
                 setmodel!(mpc, linmodel)
             end
             
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
-            updatestate!(mpc, u, y) # update mpc state estimate
+            mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
         end
 
         p_plant.sx .= p_plant.get_sx(p_plant.integ)
         KiteModels.linearize_vsm!(p_plant.s)
         updatestate!(plant, u)
-        plot_kite(s_model, i-1; zoom=false)
+        plot_kite(s_plant, i-1; zoom=false)
 
         X_data[:,i] .= p_plant.get_y(p_plant.integ)[1:length(x0)]
-        println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)). Norm Bu: $(norm(linmodel.Bu)). Norm vsm_jac: $(norm(s_model.prob.ps[sys.vsm_jac]))")
+        @printf("%4d │ %8.2fx │ %8.2fx │ %8.2fx │ %8.2fx │ %.2e\n",
+            i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A))
     end
     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
     return res
@@ -206,7 +225,7 @@ end
 
 ry = p_model.get_y(s_model.integrator)
 ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
-ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(20)
+ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(10)
 
 x̂0 = [
     p_model.x0
