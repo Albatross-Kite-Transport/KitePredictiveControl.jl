@@ -19,9 +19,8 @@ function test_model(p)
     nothing
 end
 
-function reset_p!(p, x0)
-    p.sx0 .= p.get_sx(p.integ)
-    p.x0 .= x0
+function reset_p!(p)
+    p.sx .= p.sx0
     p.set_x(p.integ, p.x0) # needs x0 for vsm linearization
     p.set_sx(p.integ, p.sx0)
     return nothing
@@ -29,8 +28,8 @@ end
 
 function plot_lin_precision()
     # Initialize states
-    reset_p!(p_model, p_model.x0)
-    reset_p!(p_plant, p_plant.x0)
+    reset_p!(p_model)
+    reset_p!(p_plant)
     KiteModels.linearize_vsm!(p_model.s)
     KiteModels.linearize_vsm!(p_plant.s)
 

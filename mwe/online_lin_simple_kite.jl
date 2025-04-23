@@ -14,6 +14,7 @@ include("plotting.jl")
 include("plot_lin_precision.jl")
 
 ad_type = AutoFiniteDiff(absstep=1e-5, relstep=1e-5)
+N = 50
 u_idxs = [1,2,3]
 
 # Initialize model
@@ -24,10 +25,10 @@ s_plant = RamAirKite(set_plant)
 dt = 1/set_model.sample_freq
 
 measure = Measurement()
-measure.sphere_pos .= deg2rad.([83.0 83.0; 1.0 -1.0])
+measure.sphere_pos .= deg2rad.([80.0 80.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=true)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.05dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
 OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
 sys = s_model.sys
 
@@ -45,6 +46,7 @@ Use quick initialization model to extend the measurements for the kalman filter
 
 # https://github.com/SciML/ModelingToolkit.jl/issues/3552#issuecomment-2817642041
 function f(x, u, _, p)
+    normalize!(x[p.Q_idxs])
     p.set_x(p.integ, x)
     p.set_sx(p.integ, p.sx)
     p.set_u(p.integ, u)
@@ -82,6 +84,9 @@ struct ModelParams{G1,G2,G3}
     sx0::Vector{Float64}
     x0::Vector{Float64}
     u0::Vector{Float64}
+    x_idxs::Dict{Num, Int64}
+    y_idxs::Dict{Num, Int64}
+    Q_idxs::Vector{Int64}
     function ModelParams(s)
         x_vec = KiteModels.get_nonstiff_unknowns(s)
         sx_vec = KiteModels.get_stiff_unknowns(s)
@@ -104,11 +109,20 @@ struct ModelParams{G1,G2,G3}
         sx0 = copy(sx)
         x0 = get_x(s.integrator)
         u0 = -s.set.drum_radius * s.integrator[s.sys.winch_force][u_idxs]
+        x_idxs = Dict{Num, Int}()
+        for (idx, sym) in enumerate(x_vec)
+            x_idxs[sym] = idx
+        end
+        y_idxs = Dict{Num, Int}()
+        for (idx, sym) in enumerate(y_vec)
+            y_idxs[sym] = idx
+        end
+        Q_idxs = [x_idxs[s.sys.Q_b_w[i]] for i in 1:4]
         
         return new{typeof(get_x), typeof(get_sx), typeof(get_y)}(
             s, s.integrator, set_x, set_ix, set_sx, sx, set_u, 
             get_x, get_sx, get_y, dt, x_vec, sx_vec, y_vec, u_vec,
-            sx0, x0, u0
+            sx0, x0, u0, x_idxs, y_idxs, Q_idxs
         )
     end
 end
@@ -118,43 +132,29 @@ p_plant = ModelParams(s_plant)
 
 test_model(p_model)
 
-x_idx = Dict{Num, Int}()
-for (idx, sym) in enumerate(p_model.x_vec)
-    x_idx[sym] = idx
-end
-y_idx = Dict{Num, Int}()
-for (idx, sym) in enumerate(p_model.y_vec)
-    y_idx[sym] = idx
-end
-
 nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 vx, vu, vy = string.(p_model.x_vec), string.(p_model.u_vec), string.(p_model.y_vec)
 model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 setstate!(model, p_model.x0)
-# setop!(model; xop=x0)
-
-N = 100
-# res = sim!(model, N, p_model.u0; x_0=x0)
-# display(plot(res; plotx=false, ploty=[11,12,13,14,15,16], plotu=false, size=(900, 900)))
 
 nu, nx, ny = length(p_plant.u_vec), length(p_plant.x_vec), length(p_plant.y_vec)
 vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_vec)
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 30, 2, fill(0.0, model.ny), fill(1.0, model.nu)
-Mwt[y_idx[sys.tether_length[1]]] = 1.0
-Mwt[y_idx[sys.angle_of_attack]] = rad2deg(1.0)
-Mwt[y_idx[sys.kite_pos[2]]] = 0.1
+Hp, Hc, Mwt, Nwt = 30, 2, fill(0.0, model.ny), fill(10.0, model.nu)
+Mwt[p_model.y_idxs[sys.tether_length[1]]] = 1.0
+Mwt[p_model.y_idxs[sys.angle_of_attack]] = 1.0
+Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 0.1
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 @time linmodel = ModelPredictiveControl.linearize(model, x=p_model.x0, u=p_model.u0)
 display(linmodel.A); display(linmodel.Bu)
 
-# Parameter	Higher Value Means	        Lower Value Means
-# Q	        Less trust in model	        More trust in model
-# R	        Less trust in measurements	More trust in measurements
-σR = fill(0.001, model.ny)
-σQ = fill(1.0, model.nx)
+# Parameter	Lower Value Means	        Higher Value Means
+# R	        More trust in measurements	Less trust in measurements
+# Q	        More trust in model	        Less trust in model
+σR = fill(0.1, model.ny)
+σQ = fill(1, model.nx)
 σQint_u = fill(0.1, model.nu)
 nint_u = fill(1, model.nu)
 umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
@@ -163,10 +163,14 @@ mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
 # plot_lin_precision()
+reset_p!(p_model)
+reset_p!(p_plant)
+KiteModels.linearize_vsm!(p_model.s)
+KiteModels.linearize_vsm!(p_plant.s)
 
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(ny))
     U_data, Y_data, Ry_data, X̂_data, X_data = 
-        zeros(model.nu, N), zeros(model.ny, N), zeros(model.ny, N), zeros(model.nx, N), zeros(plant.nx, N)
+        zeros(model.nu, N), zeros(model.ny, N), zeros(model.ny, N), zeros(model.nx, N), zeros(model.nx, N)
     setstate!(plant, px0)
     initstate!(mpc, p_model.u0, plant())
     setstate!(mpc, x̂0)
@@ -176,23 +180,24 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             x̂ = preparestate!(mpc, y)
             u = moveinput!(mpc, ry)
             
-            reset_p!(p_model, x̂[1:length(p_model.x0)])
+            p_model.sx .= p_model.get_sx(p_model.integ)
             KiteModels.linearize_vsm!(p_model.s)
-
-            # setstate!(model, x0)
-            # setstate!(plant, x0)
             
-            linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
-            setmodel!(mpc, linmodel)
+            ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
+            if !(any(isnan.(linmodel.A)) || any(isnan.(linmodel.Bu)))
+                setmodel!(mpc, linmodel)
+            end
             
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂[1:length(x0)]
             updatestate!(mpc, u, y) # update mpc state estimate
         end
-        updatestate!(plant, u)  # update plant simulator
-        KiteModels.linearize_vsm!(p_plant.s)
-        plot_kite(s_plant, i-1)
 
-        X_data[:,i] .= plant.x0
+        p_plant.sx .= p_plant.get_sx(p_plant.integ)
+        KiteModels.linearize_vsm!(p_plant.s)
+        updatestate!(plant, u)
+        plot_kite(s_model, i-1; zoom=false)
+
+        X_data[:,i] .= p_plant.get_y(p_plant.integ)[1:length(x0)]
         println("$(dt/t) times realtime at timestep $i. Norm A: $(norm(linmodel.A)). Norm Bu: $(norm(linmodel.Bu)). Norm vsm_jac: $(norm(s_model.prob.ps[sys.vsm_jac]))")
     end
     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
@@ -200,8 +205,8 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
 end
 
 ry = p_model.get_y(s_model.integrator)
-ry[y_idx[sys.kite_pos[2]]] = 1.0
-ry[y_idx[sys.angle_of_attack]] = deg2rad(20)
+ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
+ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(20)
 
 x̂0 = [
     p_model.x0
@@ -211,10 +216,10 @@ res = sim_adapt!(mpc, model, N, ry, plant, p_model.x0, p_plant.x0, x̂0)
 y_idxs = findall(x -> x != 0.0, Mwt)
 Plots.plot(res; plotx=false, ploty=y_idxs, 
     plotxwithx̂=[
-        [x_idx[sys.tether_length[i]] for i in 1:3]
-        [x_idx[sys.Q_b_w[i]] for i in 1:4]
+        [p_model.x_idxs[sys.tether_length[i]] for i in 1:3]
+        [p_model.x_idxs[sys.Q_b_w[i]] for i in 1:4]
     ], 
     plotu=true, size=(900, 900)
 )
 
-plot_lin_precision()
+# plot_lin_precision()
