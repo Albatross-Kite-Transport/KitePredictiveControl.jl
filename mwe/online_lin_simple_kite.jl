@@ -29,7 +29,7 @@ measure = Measurement()
 measure.sphere_pos .= deg2rad.([80.0 80.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; remake=false, adaptive=false)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=true)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
 OrdinaryDiffEq.set_proposed_dt!(s_plant.integrator, 0.1dt)
 sys = s_model.sys
 
@@ -96,7 +96,7 @@ struct ModelParams{G1,G2,G3}
         #     s.sys.elevation
         #     s.sys.azimuth
         # ]
-        y_vec = [KiteModels.get_nonstiff_unknowns(s; simple=true); s.sys.angle_of_attack]
+        y_vec = [KiteModels.get_nonstiff_unknowns(s); s.sys.angle_of_attack]
         u_vec = [s.sys.set_values[u_idxs[i]] for i in eachindex(u_idxs)]
 
         set_x = setu(s.integrator, x_vec)
@@ -193,14 +193,18 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             u = moveinput!(mpc, ry)
             
             p_model.sx .= p_model.get_sx(p_model.integ)
+            # TODO: set_ix, reinit dae (and check if ix is as long as defaults+guesses)
+            # TODO 2.0: use measurable variables from plant. Then use steady=true here to step the model to a steady state.
+            # remove all steady variables from x_vec
+
             vsm_t = @elapsed KiteModels.linearize_vsm!(p_model.s)
             
-            smooth = 0.9
-            lin_t = @elapsed next_linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
-            @. linmodel.A = (1-smooth)*next_linmodel.A + smooth*linmodel.A
-            @. linmodel.Bu = (1-smooth)*next_linmodel.Bu + smooth*linmodel.Bu
-            @. linmodel.C = (1-smooth)*next_linmodel.C + smooth*linmodel.C
-            # ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
+            # smooth = 0.9
+            # lin_t = @elapsed next_linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂[1:length(x0)])
+            # @. linmodel.A = (1-smooth)*next_linmodel.A + smooth*linmodel.A
+            # @. linmodel.Bu = (1-smooth)*next_linmodel.Bu + smooth*linmodel.Bu
+            # @. linmodel.C = (1-smooth)*next_linmodel.C + smooth*linmodel.C
+            lin_t = @elapsed ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂[1:length(x0)])
 
             if !(any(isnan.(linmodel.A)) || any(isnan.(linmodel.Bu)))
                 setmodel!(mpc, linmodel)
