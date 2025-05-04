@@ -12,7 +12,7 @@ function test_model(p)
             end
         end
     end
-    if length(unique(norms))*2 != length(norms) 
+    if length(unique(x -> round(x, digits=4), norms))*2 != length(norms) 
         display(norms)
         throw(ArgumentError("Different inputs/states should produce different outputs"))
     end
