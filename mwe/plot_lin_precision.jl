@@ -26,6 +26,14 @@ function reset_p!(p)
     return nothing
 end
 
+function prepare_model!(p_model, x̂)
+    p_model.set_x(p_model.integ, x̂)
+    p_model.set_ix(p_model.integ, x̂)
+    @time OrdinaryDiffEq.reinit!(p_model.integ)
+    p_model.sx .= p_model.get_sx(p_model.integ)
+    nothing
+end
+
 function plot_lin_precision()
     # Initialize states
     reset_p!(p_model)
@@ -64,6 +72,7 @@ function plot_lin_precision()
         KiteModels.linearize_vsm!(s_model)
         KiteModels.linearize_vsm!(s_plant)
         if i % 10 == 0
+            prepare_model!(p_model, nonlin_states[:,i])
             linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
         end
         
