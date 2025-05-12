@@ -28,14 +28,17 @@ include(joinpath(@__DIR__, "plotting.jl"))
 
 # Simulation parameters
 dt = 0.05
-total_time = 1.0  # Seconds of simulation after stabilization
+total_time = 5.0  # Seconds of simulation after stabilization
 vsm_interval = 3
 steps = Int(round(total_time / dt))
+trunc = false
+steering_freq = 1/2  # Hz - full left-right cycle frequency
+steering_magnitude = 1.0      # Magnitude of steering input [Nm]
 
 # Initialize model
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 set = load_settings("system_model.yaml")
-set_values = [-50.0, 0.0, 0.0]  # Set values of the torques of the three winches. [Nm]
+set_values = [-60.0, 0.0, 0.0]  # Set values of the torques of the three winches. [Nm]
 set.quasi_static = false
 set.physical_model = "simple_ram"
 
@@ -51,13 +54,15 @@ measure = Measurement()
 # Initialize at elevation with linearization outputs
 s.point_system.winches[2].tether_length += 0.2
 s.point_system.winches[3].tether_length += 0.2
-measure.sphere_pos .= deg2rad.([70.0 70.0; 1.0 -1.0])
+measure.sphere_pos .= deg2rad.([60.0 60.0; 1.0 -1.0])
 KiteModels.init_sim!(s, measure; 
     remake=false,
     reload=true,
     lin_outputs=[ω_b...]  # Specify which outputs to track in linear model
 )
 sys = s.sys
+
+@show rad2deg(s.integrator[sys.elevation])
 
 @info "System initialized at:"
 toc()
@@ -70,14 +75,6 @@ for i in 1:stabilization_steps
     next_step!(s; dt, vsm_interval=0.05÷dt)
 end
 s.integrator.ps[sys.stabilize] = false
-
-# --- Linearize at operating point ---
-@info "Linearizing system at operating point..."
-@time (; A, B, C, D) = KiteModels.linearize(s)
-@info "System linearized with matrix dimensions:" A=size(A) B=size(B) C=size(C) D=size(D)
-csys = ss(A, B, C, D)
-@time dsys = c2d(csys, dt)
-@time tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=23)
 
 # --- Get operating point values ---
 # Extract state and input at operating point
@@ -95,67 +92,94 @@ logger_linear = Logger(length(s.point_system.points), steps)  # Same structure f
 sys_state_nonlinear = KiteModels.SysState(s)
 sys_state_linear = deepcopy(sys_state_op) # Initialize linear state to operating point
 
-# --- Prepare the simulation ---
-sim_time = 0.0
-simulation_time_points = Float64[]
-# Input history for plotting
-input_history = Vector{Float64}[]
-# Perturbation input history (will be used for lsim)
-perturbation_history = Vector{Float64}[]
 
-x_lin = zeros(tsys.nx)
-
-@info "Starting side-by-side simulation..."
-# Begin simulation
-try
-    sim_time = 0.0  # Start at t=0 for the comparison
-
-    while sim_time < total_time
-        global x_lin
-
-        push!(simulation_time_points, sim_time)
-        
-        # --- Calculate steering inputs ---
-        steering = 10.0
-        perturbation = [0.0, steering, -steering]
-        set_values_nonlinear = u_op .+ perturbation
-        push!(input_history, copy(set_values_nonlinear))
-        push!(perturbation_history, copy(perturbation))
-
-        # --- Nonlinear simulation step ---
-        (t_new, _) = next_step!(s, set_values_nonlinear; dt, vsm_interval=vsm_interval)
-        sim_time = t_new - dt*stabilization_steps
-        KiteModels.update_sys_state!(sys_state_nonlinear, s)
-        sys_state_nonlinear.time = sim_time
-        log!(logger_nonlinear, sys_state_nonlinear)
-
-        # --- Linear simulation step ---
-        # Create input matrix for lsim (single timestep)
-        u_matrix = hcat(perturbation, perturbation)  # Create two identical input vectors
-        t_vector = [0, dt] # Time vector for a single step
-
-        # Simulate one step with lsim
-        y_lin, t_lin, x_lin_ = lsim(tsys, u_matrix, t_vector; x0=x_lin)
-        x_lin .= x_lin_[:,end]
-
-        # Update linear system state
-        @show y_lin[:,end]
-        sys_state_linear.turn_rates = sys_state_op.turn_rates .+ y_lin[:,end] # Use the last output
-
-        # Log the linear state
-        sys_state_linear.time = sim_time
-        log!(logger_linear, sys_state_linear)
-    end
-catch e
-    if isa(e, AssertionError)
-        @show sim_time
-        println(e)
+function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
+    simulation_time_points = Float64[]
+    steering_history = Float64[]
+    perturbation_history = Vector{Float64}[]
+    
+    @info "Starting side-by-side simulation..."
+    (; A, B, C, D) = KiteModels.linearize(s)
+    csys = ss(A, B, C, D)
+    dsys = c2d(csys, dt)
+    if trunc
+        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=17)
+        wanted_nx = count(x -> x > 1e-4, hs)
+        @info "Nx should be $wanted_nx"
     else
-        rethrow(e)
+        tsys = dsys
     end
+    x_lin = zeros(tsys.nx)
+    sim_time = 0.0
+    try
+        for i in 1:steps
+            push!(simulation_time_points, sim_time)
+            # plot_kite(s, sim_time; zoom=false, front=false)
+
+            # --- Calculate steering inputs ---
+            steering = steering_magnitude * cos(2π * steering_freq * sim_time)
+            perturbation = [0.0, steering, -steering]
+
+            u_op = -s.set.drum_radius .* s.integrator[sys.winch_force]
+            s.lin_prob.ps[sys.set_values] = u_op
+
+            set_values_nonlinear = u_op + perturbation
+            push!(steering_history, steering)
+            push!(perturbation_history, copy(perturbation))
+
+            # --- Nonlinear simulation step ---
+            (t_new, _) = next_step!(s, set_values_nonlinear; dt, vsm_interval=vsm_interval)
+            sim_time = t_new - dt*stabilization_steps
+            KiteModels.update_sys_state!(sys_state_nonlinear, s)
+            sys_state_nonlinear.time = sim_time
+            log!(logger_nonlinear, sys_state_nonlinear)
+
+            # --- Linear simulation step ---
+            # Create input matrix for lsim (single timestep)
+            u_matrix = hcat(perturbation, perturbation)  # Create two identical input vectors
+            t_vector = [0, dt] # Time vector for a single step
+
+            # Simulate one step with lsim
+            # --- Linearize at operating point ---
+            if i%((1÷steering_freq)÷dt÷2) == 0
+                (; A, B, C, D) = KiteModels.linearize(s)
+                csys = ss(A, B, C, D)
+                dsys = c2d(csys, dt)
+                if trunc
+                    tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=tsys.nx)
+                else
+                    tsys = dsys
+                end
+
+                # Reset operating point
+                sys_state_op = KiteModels.SysState(s)
+                x_lin = zeros(tsys.nx) # Reset initial condition for lsim
+            end
+
+            y_lin, t_lin, x_lin_ = lsim(tsys, u_matrix, t_vector; x0=x_lin)
+            x_lin .= x_lin_[:,end]
+
+            # Update linear system state
+            sys_state_linear.turn_rates = sys_state_op.turn_rates .+ y_lin[:,end] # Use the last output
+
+            # Log the linear state
+            sys_state_linear.time = sim_time
+            log!(logger_linear, sys_state_linear)
+        end
+    catch e
+        if isa(e, AssertionError)
+            @show sim_time
+            println(e)
+        else
+            rethrow(e)
+        end
+    end
+    return simulation_time_points, steering_history, perturbation_history
 end
 
-@info "Nonlinear simulation completed"
+simulation_time_points, steering_history, perturbation_history = simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
+
+@info "Simulation completed"
 
 # --- Save logs ---
 save_log(logger_nonlinear, "nonlinear_model")
@@ -169,22 +193,15 @@ sl_linear = lg_linear.syslog
 # Extract data
 turn_rates_nl = rad2deg.(hcat(sl_nonlinear.turn_rates...))
 turn_rates_lin = rad2deg.(hcat(sl_linear.turn_rates...))
-steering = [inputs[2] - u_op[2] for inputs in input_history]
 
 # Find common time
-t_common = sl_nonlinear.time[1:min(length(sl_nonlinear.time), length(sl_linear.time))]
-min_length = length(t_common)
-
-# Trim data
-turn_rates_nl = turn_rates_nl[:, 1:min_length]
-turn_rates_lin = turn_rates_lin[:, 1:min_length]
-steering = steering[1:min_length]
+t_common = sl_nonlinear.time
 
 # Create comparison data
 ω_x = [turn_rates_nl[1,:], turn_rates_lin[1,:]]
 ω_y = [turn_rates_nl[2,:], turn_rates_lin[2,:]]
-ω_z = [turn_rates_nl[3,:], turn_rates_lin[3,:]]
-input_series = [steering]
+ω_z = [clamp.(turn_rates_nl[3,:], -2.5, 0.0), turn_rates_lin[3,:]]
+input_series = [steering_history]
 
 # Plot
 p_comparison = plotx(t_common,
@@ -200,8 +217,8 @@ p_comparison = plotx(t_common,
 display(p_comparison)
 
 # --- Error metrics ---
-error_ω_x = norm(ω_x[1] - ω_x[2]) / min_length
-error_ω_y = norm(ω_y[1] - ω_y[2]) / min_length
-error_ω_z = norm(ω_z[1] - ω_z[2]) / min_length
+error_ω_x = norm(ω_x[1] - ω_x[2]) / length(t_common)
+error_ω_y = norm(ω_y[1] - ω_y[2]) / length(t_common)
+error_ω_z = norm(ω_z[1] - ω_z[2]) / length(t_common)
 
 @info "Error metrics (avg. L2 norm):" error_ω_x error_ω_y error_ω_z
