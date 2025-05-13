@@ -5,6 +5,7 @@ version = "0.0.0"
 
 [deps]
 ControlSystems = "a6e380b2-a6ca-5380-bf3e-84a91bcd477e"
+ControlSystemsMTK = "687d7614-c7e5-45fc-bfc3-9ee385575c88"
 DAQP = "c47d62df-3981-49c8-9651-128b1cd08617"
 DSP = "717857b8-e6f2-59f4-9121-6e50c889abd2"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
@@ -42,6 +43,7 @@ KiteModels = {rev = "develop", url = "https://github.com/ufechner7/KiteModels.jl
 
 [compat]
 ControlSystems = "1.12.0"
+ControlSystemsMTK = "2.3.2"
 DAQP = "0.6.0"
 DSP = "0.8.3"
 DifferentiationInterface = "0.6.50"

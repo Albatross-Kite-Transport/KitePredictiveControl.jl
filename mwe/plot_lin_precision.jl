@@ -60,6 +60,7 @@ function plot_lin_precision()
     # Simulation loop
     for i in 2:N
         # Calculate inputs
+        @show i
         u = p_model.u0 .+ 10.0
         
         # Update states
@@ -71,10 +72,10 @@ function plot_lin_precision()
         p_plant.sx .= p_plant.get_sx(p_plant.integ)
         KiteModels.linearize_vsm!(s_model)
         KiteModels.linearize_vsm!(s_plant)
-        if i % 10 == 0
-            prepare_model!(p_model, nonlin_states[:,i])
-            linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
-        end
+        # if i % 10 == 0
+        #     prepare_model!(p_model, nonlin_states[:,i])
+        #     linearize!(linmodel, model; u=u, x=nonlin_states[:,i])
+        # end
         
         t += dt
         times[i] = t

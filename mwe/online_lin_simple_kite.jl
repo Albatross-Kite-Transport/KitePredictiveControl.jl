@@ -28,10 +28,10 @@ dt = 1/set_model.sample_freq
 measure = Measurement()
 measure.sphere_pos .= deg2rad.([70.0 70.0; 1.0 -1.0])
 KiteModels.init_sim!(s_model, measure; 
-    adaptive=false, remake=false, reload=true, 
+    adaptive=true, remake=false, reload=true, 
     solver=FBDF(nlsolve=OrdinaryDiffEq.NLNewton(relax=0.8, max_iter=1000))
 )
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, dt)
+OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.1dt)
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=true)
 sys = s_model.sys
 
@@ -67,7 +67,6 @@ function f(x, u, _, p)
     end
     xnext = p.get_x(p.integ)
     !successful_retcode(p.integ.sol) && (xnext .= NaN)
-    @show norm(xnext)
     return xnext
 end
 
@@ -186,80 +185,80 @@ reset_p!(p_plant)
 KiteModels.linearize_vsm!(p_model.s)
 KiteModels.linearize_vsm!(p_plant.s)
 
-# plot_lin_precision()
+plot_lin_precision()
 
-function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(ny))
-    U_data, Y_data, Ry_data, X̂_data, X_data = 
-        zeros(model.nu, N), zeros(model.ny, N), zeros(model.ny, N), zeros(model.nx, N), zeros(model.nx, N)
-    setstate!(plant, px0)
-    initstate!(mpc, p_model.u0, plant())
-    setstate!(mpc, x̂0)
-    println("\nStarting simulation...")
-    println("─"^80)
-    println(
-        rpad("Step", 6),
-        rpad("Real-time", 12),
-        rpad("VSM", 12),
-        rpad("Lin", 12),
-        rpad("MPC", 12),
-        rpad("Norm(A)", 12),
-        "success"
-    )
-    println("─"^80)
-    success = false
-    for i = 1:N
-        t = @elapsed begin
-            y = plant() + y_step
-            x̂ = preparestate!(mpc, y)[1:length(x0)]
-            u = moveinput!(mpc, ry)
+# function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(ny))
+#     U_data, Y_data, Ry_data, X̂_data, X_data = 
+#         zeros(model.nu, N), zeros(model.ny, N), zeros(model.ny, N), zeros(model.nx, N), zeros(model.nx, N)
+#     setstate!(plant, px0)
+#     initstate!(mpc, p_model.u0, plant())
+#     setstate!(mpc, x̂0)
+#     println("\nStarting simulation...")
+#     println("─"^80)
+#     println(
+#         rpad("Step", 6),
+#         rpad("Real-time", 12),
+#         rpad("VSM", 12),
+#         rpad("Lin", 12),
+#         rpad("MPC", 12),
+#         rpad("Norm(A)", 12),
+#         "success"
+#     )
+#     println("─"^80)
+#     success = false
+#     for i = 1:N
+#         t = @elapsed begin
+#             y = plant() + y_step
+#             x̂ = preparestate!(mpc, y)[1:length(x0)]
+#             u = moveinput!(mpc, ry)
             
-            vsm_t = @elapsed KiteModels.linearize_vsm!(p_model.s)
-            prepare_model!(p_model, x̂)
+#             vsm_t = @elapsed KiteModels.linearize_vsm!(p_model.s)
+#             prepare_model!(p_model, x̂)
             
-            # smooth = 0.9
-            # lin_t = @elapsed next_linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂)
-            # @. linmodel.A = (1-smooth)*next_linmodel.A + smooth*linmodel.A
-            # @. linmodel.Bu = (1-smooth)*next_linmodel.Bu + smooth*linmodel.Bu
-            # @. linmodel.C = (1-smooth)*next_linmodel.C + smooth*linmodel.C
-            lin_t = @elapsed ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂)
+#             # smooth = 0.9
+#             # lin_t = @elapsed next_linmodel = ModelPredictiveControl.linearize(nonlinmodel; u, x=x̂)
+#             # @. linmodel.A = (1-smooth)*next_linmodel.A + smooth*linmodel.A
+#             # @. linmodel.Bu = (1-smooth)*next_linmodel.Bu + smooth*linmodel.Bu
+#             # @. linmodel.C = (1-smooth)*next_linmodel.C + smooth*linmodel.C
+#             lin_t = @elapsed ModelPredictiveControl.linearize!(linmodel, nonlinmodel; u, x=x̂)
 
-            success = false
-            if !(any(isnan.(linmodel.A)) || any(isnan.(linmodel.Bu)))
-                success = true
-                setmodel!(mpc, linmodel)
-            end
+#             success = false
+#             if !(any(isnan.(linmodel.A)) || any(isnan.(linmodel.Bu)))
+#                 success = true
+#                 setmodel!(mpc, linmodel)
+#             end
             
-            U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂
-            mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
-        end
+#             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂
+#             mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
+#         end
 
-        p_plant.sx .= p_plant.get_sx(p_plant.integ)
-        KiteModels.linearize_vsm!(p_plant.s)
-        updatestate!(plant, u)
-        plot_kite(s_plant, i-1; zoom=true)
+#         p_plant.sx .= p_plant.get_sx(p_plant.integ)
+#         KiteModels.linearize_vsm!(p_plant.s)
+#         updatestate!(plant, u)
+#         plot_kite(s_plant, i-1; zoom=true)
 
-        X_data[:,i] .= p_plant.get_y(p_plant.integ)[1:length(x0)]
-        @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %.2e | %d\n",
-            i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A), success)
-    end
-    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
-    return res
-end
+#         X_data[:,i] .= p_plant.get_y(p_plant.integ)[1:length(x0)]
+#         @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %.2e | %d\n",
+#             i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A), success)
+#     end
+#     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, X_data)
+#     return res
+# end
 
-ry = p_model.get_y(s_model.integrator)
-ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
-# ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(10)
+# ry = p_model.get_y(s_model.integrator)
+# ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
+# # ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(10)
 
-x̂0 = [
-    p_model.x0
-    p_model.get_y(s_model.integrator)
-]
-res = sim_adapt!(mpc, model, N, ry, plant, p_model.x0, p_plant.x0, x̂0)
-y_idxs = findall(x -> x != 0.0, Mwt)
-Plots.plot(res; plotx=false, ploty=y_idxs, 
-    plotxwithx̂=[
-        [p_model.x_idxs[sys.tether_length[i]] for i in 1:3]
-        [p_model.x_idxs[sys.Q_b_w[i]] for i in 1:4]
-    ], 
-    plotu=true, size=(900, 900)
-)
+# x̂0 = [
+#     p_model.x0
+#     p_model.get_y(s_model.integrator)
+# ]
+# res = sim_adapt!(mpc, model, N, ry, plant, p_model.x0, p_plant.x0, x̂0)
+# y_idxs = findall(x -> x != 0.0, Mwt)
+# Plots.plot(res; plotx=false, ploty=y_idxs, 
+#     plotxwithx̂=[
+#         [p_model.x_idxs[sys.tether_length[i]] for i in 1:3]
+#         [p_model.x_idxs[sys.Q_b_w[i]] for i in 1:4]
+#     ], 
+#     plotu=true, size=(900, 900)
+# )

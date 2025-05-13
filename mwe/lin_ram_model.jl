@@ -20,18 +20,21 @@ using ModelingToolkit: t_nounits as t
 using ModelingToolkit
 using ControlSystems
 using RobustAndOptimalControl
-using ControlPlots
+using Plots
+# using ControlPlots
+
+# TODO: figure out bodeplots https://juliacontrol.github.io/ControlSystemsMTK.jl/dev/batch_linearization/#Linearize-around-a-trajectory
 
 toc()
 
-include(joinpath(@__DIR__, "plotting.jl"))
+# include(joinpath(@__DIR__, "plotting.jl"))
 
 # Simulation parameters
 dt = 0.05
 total_time = 5.0  # Seconds of simulation after stabilization
 vsm_interval = 3
 steps = Int(round(total_time / dt))
-trunc = false
+trunc = true
 steering_freq = 1/2  # Hz - full left-right cycle frequency
 steering_magnitude = 1.0      # Magnitude of steering input [Nm]
 
@@ -58,7 +61,7 @@ measure.sphere_pos .= deg2rad.([60.0 60.0; 1.0 -1.0])
 KiteModels.init_sim!(s, measure; 
     remake=false,
     reload=true,
-    lin_outputs=[ω_b...]  # Specify which outputs to track in linear model
+    lin_outputs=[ω_b[3]]  # Specify which outputs to track in linear model
 )
 sys = s.sys
 
@@ -99,16 +102,17 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
     perturbation_history = Vector{Float64}[]
     
     @info "Starting side-by-side simulation..."
-    (; A, B, C, D) = KiteModels.linearize(s)
-    csys = ss(A, B, C, D)
+    matrices = KiteModels.linearize(s)
+    csys = ss(matrices...)
     dsys = c2d(csys, dt)
     if trunc
-        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=17)
+        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=24)
         wanted_nx = count(x -> x > 1e-4, hs)
         @info "Nx should be $wanted_nx"
     else
         tsys = dsys
     end
+
     x_lin = zeros(tsys.nx)
     sim_time = 0.0
     try
@@ -141,8 +145,10 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
 
             # Simulate one step with lsim
             # --- Linearize at operating point ---
-            if i%((1÷steering_freq)÷dt÷2) == 0
+            if i%10 == 0
                 (; A, B, C, D) = KiteModels.linearize(s)
+
+                @show norm(A)
                 csys = ss(A, B, C, D)
                 dsys = c2d(csys, dt)
                 if trunc
@@ -174,10 +180,10 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
             rethrow(e)
         end
     end
-    return simulation_time_points, steering_history, perturbation_history
+    return simulation_time_points, steering_history, perturbation_history, csys, dsys, tsys
 end
 
-simulation_time_points, steering_history, perturbation_history = simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
+simulation_time_points, steering_history, perturbation_history, csys, dsys, tsys = simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
 
 @info "Simulation completed"
 
@@ -203,22 +209,22 @@ t_common = sl_nonlinear.time
 ω_z = [clamp.(turn_rates_nl[3,:], -2.5, 0.0), turn_rates_lin[3,:]]
 input_series = [steering_history]
 
-# Plot
-p_comparison = plotx(t_common,
-    ω_x, ω_y, ω_z, input_series;
-    ylabels=["ω_x [°/s]", "ω_y [°/s]", "ω_z [°/s]", "Steering [Nm]"],
-    labels=[
-        ["Nonlinear", "Linear (lsim)"],
-        ["Nonlinear", "Linear (lsim)"],
-        ["Nonlinear", "Linear (lsim)"],
-        ["Input"]
-    ],
-    fig="Linear vs Nonlinear Model Comparison (lsim)")
+# Create Plots
+p1 = plot(t_common, ω_x, title="ω_x [°/s]", label=["Nonlinear" "Linear (lsim)"])
+p2 = plot(t_common, ω_y, title="ω_y [°/s]", label=["Nonlinear" "Linear (lsim)"])
+p3 = plot(t_common, ω_z, title="ω_z [°/s]", label=["Nonlinear" "Linear (lsim)"])
+p4 = plot(t_common, input_series, title="Steering [Nm]", label="Input")
+bode1 = bodeplot(dsys)
+bode2 = bodeplot(tsys)
+
+# Combine plots into a single layout
+p_comparison = plot(p1, p2, p3, p4, bode1, bode2, layout=(3,2), size=(1200, 1200))
+
 display(p_comparison)
 
 # --- Error metrics ---
-error_ω_x = norm(ω_x[1] - ω_x[2]) / length(t_common)
-error_ω_y = norm(ω_y[1] - ω_y[2]) / length(t_common)
-error_ω_z = norm(ω_z[1] - ω_z[2]) / length(t_common)
+error_ω_x = norm(ω_x[1,:] - ω_x[2,:]) / length(t_common)
+error_ω_y = norm(ω_y[1,:] - ω_y[2,:]) / length(t_common)
+error_ω_z = norm(ω_z[1,:] - ω_z[2,:]) / length(t_common)
 
 @info "Error metrics (avg. L2 norm):" error_ω_x error_ω_y error_ω_z
