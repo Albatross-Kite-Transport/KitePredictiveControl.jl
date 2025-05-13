@@ -106,7 +106,7 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
     csys = ss(matrices...)
     dsys = c2d(csys, dt)
     if trunc
-        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=24)
+        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=20)
         wanted_nx = count(x -> x > 1e-4, hs)
         @info "Nx should be $wanted_nx"
     else
@@ -147,7 +147,6 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
             # --- Linearize at operating point ---
             if i%10 == 0
                 (; A, B, C, D) = KiteModels.linearize(s)
-
                 @show norm(A)
                 csys = ss(A, B, C, D)
                 dsys = c2d(csys, dt)
@@ -218,7 +217,8 @@ bode1 = bodeplot(dsys)
 bode2 = bodeplot(tsys)
 
 # Combine plots into a single layout
-p_comparison = plot(p1, p2, p3, p4, bode1, bode2, layout=(3,2), size=(1200, 1200))
+# p_comparison = plot(p1, p2, p3, p4, bode1, bode2, layout=(3,2), size=(1200, 1200))
+p_comparison = plot(bode1, bode2, size=(1800, 1200))
 
 display(p_comparison)
 
