@@ -16,8 +16,8 @@ using Printf
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
-N = 20
-trunc = false
+N = 100
+trunc = true
 u_idxs = [1,2,3]
 
 # Initialize model
@@ -151,11 +151,13 @@ nu, nx, ny = length(p_plant.u_vec), length(p_plant.x_vec), length(p_plant.y_vec)
 vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_vec)
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 20, 2, fill(0.0, model.ny), fill(1.0, model.nu)
-Mwt[p_model.y_idxs[sys.tether_length[1]]] = 1.0
+Hp, Hc, Mwt, Nwt = 5, 2, fill(0.0, model.ny), fill(0.01, model.nu)
+Mwt[p_model.y_idxs[sys.tether_length[1]]] = 10.0
+Mwt[p_model.y_idxs[sys.tether_length[2]]] = 1.0
+Mwt[p_model.y_idxs[sys.tether_length[3]]] = 1.0
 # Mwt[p_model.y_idxs[sys.angle_of_attack]] = rad2deg(1.0)
 # Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
-Mwt[p_model.y_idxs[sys.heading_x]] = 1.0
+# Mwt[p_model.y_idxs[sys.heading_x]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 function calc_tsys(s)
@@ -182,7 +184,7 @@ display(linmodel.A); display(linmodel.Bu)
 # R	        More trust in measurements	Less trust in measurements
 # Q	        More trust in model	        Less trust in model
 σR = fill(0.1, linmodel.ny)
-σQ = fill(1.0, linmodel.nx)
+σQ = fill(0.1, linmodel.nx)
 σQint_u = fill(0.1, linmodel.nu)
 nint_u = fill(1, linmodel.nu)
 umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
@@ -195,8 +197,8 @@ KiteModels.linearize_vsm!(p_model.s)
 KiteModels.linearize_vsm!(p_plant.s)
 
 function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(ny))
-    U_data, Y_data, Ry_data, X̂_data = 
-        zeros(linmodel.nu, N), zeros(linmodel.ny, N), zeros(linmodel.ny, N), zeros(linmodel.nx, N)
+    U_data, Y_data, Ry_data, X̂_data, Ŷ_data = 
+        zeros(linmodel.nu, N), zeros(linmodel.ny, N), zeros(linmodel.ny, N), zeros(linmodel.nx, N), zeros(linmodel.ny, N)
     setstate!(plant, px0)
     initstate!(mpc, p_model.u0, plant())
     setstate!(mpc, x̂0)
@@ -217,7 +219,7 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             x̂ = preparestate!(mpc, y)[1:length(x0)]
             u = moveinput!(mpc, ry)
             
-            U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i] = u, y, ry, x̂
+            U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂, mpc.ŷ
             mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
         end
 
@@ -229,7 +231,7 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
         @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %.2e\n",
             i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A))
     end
-    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data)
+    res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, Ŷ_data)
     return res
 end
 
@@ -237,15 +239,15 @@ ry = p_model.y0
 # ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 # ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(10)
 
-M = [
-    (I - linmodel.A);
-    linmodel.C
-]
-b = [
-    linmodel.Bu * linmodel.uop;
-    linmodel.yop
-]
-x0 = M \ b
+# M = [
+#     (I - linmodel.A);
+#     linmodel.C
+# ]
+# b = [
+#     linmodel.Bu * linmodel.uop;
+#     linmodel.yop
+# ]
+x0 = zeros(linmodel.nx)
 x̂0 = [
     x0
     p_model.y0
@@ -253,6 +255,7 @@ x̂0 = [
 res = sim_adapt!(mpc, model, N, ry, plant, x0, p_plant.x0, x̂0)
 y_idxs = findall(x -> x != 0.0, Mwt)
 Plots.plot(res; plotx=false, ploty=y_idxs, 
-    plotxwithx̂=false, 
+    plotxwithx̂=false,
+    plotŷ=true,
     plotu=true, size=(900, 900)
 )
