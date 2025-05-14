@@ -13,12 +13,12 @@ using ControlSystems
 using Plots
 using Printf
 
+include("utils.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
-N = 100
-trunc = true
-u_idxs = [1,2,3]
+N = 200
+trunc = false
 
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
@@ -37,15 +37,19 @@ sys = s_plant.sys
 measured_states = [
     sys.elevation
     sys.elevation_vel
-    sys.elevation_acc
     sys.azimuth
     sys.azimuth_vel
-    sys.azimuth_acc
-    sys.heading_x
+    sys.heading_x # TODO: maybe can be removed, should at least be relative to straight up
+    sys.turn_rate
     sys.tether_length...
     sys.tether_vel...
 ]
-KiteModels.init_sim!(s_model, measure; remake=false, adaptive=true, lin_outputs=measured_states)
+unknowns = KiteModels.get_nonstiff_unknowns(s_plant)
+lin_outputs = unique([
+    measured_states
+    unknowns
+])
+KiteModels.init_sim!(s_model, measure; remake=false, adaptive=true, lin_outputs)
 
 function stabilize!(s, T=10)
     s.integrator.ps[s.sys.stabilize] = true
@@ -82,65 +86,8 @@ function h(x, _, p)
     return y
 end
 
-# Get initial state
-struct ModelParams{G1,G2}
-    s::RamAirKite
-    integ::OrdinaryDiffEq.ODEIntegrator
-    set_x::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}
-    set_ix::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}
-    set_u::SymbolicIndexingInterface.MultipleSetters
-    get_x::G1
-    get_y::G2
-    dt::Float64
-    
-    x_vec::Vector{Num}
-    y_vec::Vector{Num}
-    u_vec::Vector{Num}
-    x0::Vector{Float64}
-    y0::Vector{Float64}
-    u0::Vector{Float64}
-    x_idxs::Dict{Num, Int64}
-    y_idxs::Dict{Num, Int64}
-    Q_idxs::Vector{Int64}
-    function ModelParams(s, y_vec)
-        # [println(x) for x in x_vec]
-        # y_vec = [
-        #     [s.sys.tether_length[i] for i in 1:3]
-        #     s.sys.elevation
-        #     s.sys.azimuth
-        # ]
-        x_vec = KiteModels.get_unknowns(s_model)
-        u_vec = [s.sys.set_values[u_idxs[i]] for i in eachindex(u_idxs)]
-
-        set_x = setu(s.integrator, x_vec)
-        set_ix = setu(s.integrator, Initial.(x_vec))
-        set_u = setu(s.integrator, u_vec)
-        get_x = getu(s.integrator, x_vec)
-        get_y = getu(s.integrator, y_vec)
-        x0 = get_x(s.integrator)
-        y0 = get_y(s.integrator)
-        u0 = -s.set.drum_radius * s.integrator[s.sys.winch_force][u_idxs]
-        u0 = [-50.0, -1.0, -1.0][u_idxs]
-        x_idxs = Dict{Num, Int}()
-        for (idx, sym) in enumerate(x_vec)
-            x_idxs[sym] = idx
-        end
-        y_idxs = Dict{Num, Int}()
-        for (idx, sym) in enumerate(y_vec)
-            y_idxs[sym] = idx
-        end
-        Q_idxs = [x_idxs[s.sys.Q_b_w[i]] for i in 1:4]
-        
-        return new{typeof(get_x), typeof(get_y)}(
-            s, s.integrator, set_x, set_ix, set_u, 
-            get_x, get_y, dt, x_vec, y_vec, u_vec,
-            x0, y0, u0, x_idxs, y_idxs, Q_idxs
-        )
-    end
-end
-
-p_model = ModelParams(s_model, measured_states)
-p_plant = ModelParams(s_plant, measured_states)
+p_model = ModelParams(s_model, lin_outputs)
+p_plant = ModelParams(s_plant, lin_outputs)
 
 nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
 vx, vu, vy = string.(p_model.x_vec), string.(p_model.u_vec), string.(p_model.y_vec)
@@ -151,43 +98,59 @@ nu, nx, ny = length(p_plant.u_vec), length(p_plant.x_vec), length(p_plant.y_vec)
 vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_vec)
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
-Hp, Hc, Mwt, Nwt = 5, 2, fill(0.0, model.ny), fill(0.01, model.nu)
+Hp, Hc, Mwt = 50, 2, fill(0.0, model.ny)
+Nwt = [0.01, 0.1, 0.1]
 Mwt[p_model.y_idxs[sys.tether_length[1]]] = 10.0
 Mwt[p_model.y_idxs[sys.tether_length[2]]] = 1.0
 Mwt[p_model.y_idxs[sys.tether_length[3]]] = 1.0
-# Mwt[p_model.y_idxs[sys.angle_of_attack]] = rad2deg(1.0)
-# Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
-# Mwt[p_model.y_idxs[sys.heading_x]] = 1.0
+Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
-function calc_tsys(s)
-    (; A, B, C, D) = KiteModels.linearize(s)
-    @show norm(A)
-    csys = ss(A, B, C, D)
-    if trunc
-        tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=24)
-        @show norm(tsys.D)
-        tsys.D .= 0.0
-    else
-        tsys = csys
+function calc_dsys(s, u, y)
+    vsm_t = @elapsed begin
+        s.set_nonstiff(s.integrator, y)
+        OrdinaryDiffEq.reinit!(s.integrator, s.integrator.u; reinit_dae=false)
+        s.integrator.ps[s.sys.fix_nonstiff] = true
+        next_step!(s, u)
+        s.integrator.ps[s.sys.fix_nonstiff] = false
     end
-    return tsys
+
+    # either use y to find full nonstiff state
+    # or have y contain the full nonstiff state
+
+    lin_t = @elapsed begin
+        (; A, B, C, D) = KiteModels.linearize(s)
+        csys = ss(A, B, C, D)
+        if trunc
+            tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=length(unknowns))
+            # tsys.D .= 0.0
+        else
+            tsys = csys
+        end
+        dsys = c2d(tsys, dt)
+    end
+    # @assert norm(dsys.D) ≈ 0
+    return dsys, vsm_t, lin_t
 end
 
-tsys = calc_tsys(s_model)
-@time linmodel = ModelPredictiveControl.LinModel(tsys, dt)
+nonstiff_idxs = [p_model.y_idxs[sym] for sym in unknowns]
+measured_idxs = [p_model.y_idxs[sym] for sym in measured_states]
+dsys, _, _ = calc_dsys(s_model, p_model.u0, p_model.y0[nonstiff_idxs])
+linmodel = ModelPredictiveControl.LinModel(dsys.A, dsys.B, dsys.C, dsys.B[:,end:end-1], dsys.D[:,end:end-1], dt)
 setname!(linmodel; u=vu, y=vy)
 setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
 display(linmodel.A); display(linmodel.Bu)
 
 # Parameter	Lower Value Means	        Higher Value Means
-# R	        More trust in measurements	Less trust in measurements
-# Q	        More trust in model	        Less trust in model
-σR = fill(0.1, linmodel.ny)
-σQ = fill(0.1, linmodel.nx)
+# R	        Less noisy measurements	    More noisy measurements
+# Q	        Less noisy model	        More noisy model
+σR = zeros(linmodel.ny)
+σR[nonstiff_idxs] .= 1e12
+σR[measured_idxs] .= 0.1
+σQ = fill(1.0, linmodel.nx)
 σQint_u = fill(0.1, linmodel.nu)
 nint_u = fill(1, linmodel.nu)
-umin, umax = [-100, -20, -20][u_idxs], [0, 0, 0][u_idxs]
+umin, umax = [-100, -20, -20], [0, 0, 0]
 estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
@@ -218,7 +181,14 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             y = plant() + y_step
             x̂ = preparestate!(mpc, y)[1:length(x0)]
             u = moveinput!(mpc, ry)
-            
+
+            dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[nonstiff_idxs])
+            linmodel.A .= dsys.A
+            linmodel.Bu .= dsys.B
+            linmodel.C .= dsys.C
+            setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
+            setmodel!(mpc, linmodel)
+
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂, mpc.ŷ
             mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
         end
@@ -227,7 +197,6 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
         updatestate!(plant, u)
         # plot_kite(s_plant, i-1; zoom=true)
 
-        vsm_t, lin_t = zeros(2)
         @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %.2e\n",
             i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A))
     end
@@ -253,7 +222,10 @@ x̂0 = [
     p_model.y0
 ]
 res = sim_adapt!(mpc, model, N, ry, plant, x0, p_plant.x0, x̂0)
-y_idxs = findall(x -> x != 0.0, Mwt)
+y_idxs = [
+    findall(x -> x != 0.0, Mwt)
+    [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
+]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
     plotxwithx̂=false,
     plotŷ=true,
