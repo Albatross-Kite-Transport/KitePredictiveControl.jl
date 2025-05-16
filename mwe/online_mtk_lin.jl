@@ -17,8 +17,8 @@ include("utils.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
-N = 200
-trunc = false
+N = 100
+trunc = true
 
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
@@ -34,16 +34,23 @@ measure.sphere_pos .= deg2rad.([70.0 70.0; 1.0 -1.0])
 KiteModels.init_sim!(s_plant, measure; remake=false, adaptive=true)
 sys = s_plant.sys
 
-measured_states = [
-    sys.elevation
-    sys.elevation_vel
-    sys.azimuth
-    sys.azimuth_vel
-    sys.heading_x # TODO: maybe can be removed, should at least be relative to straight up
-    sys.turn_rate
-    sys.tether_length...
-    sys.tether_vel...
-]
+measured_states = @variables begin
+    elevation(t)
+    elevation_vel(t)
+    elevation_acc(t)
+    azimuth(t)
+    azimuth_vel(t)
+    azimuth_acc(t)
+    heading_x(t)
+    turn_rate(t)[1:3]
+    turn_acc(t)[1:3]
+    tether_length(t)[1:3]
+    tether_vel(t)[1:3]
+    distance(t) # can only be approximated, but let's test
+    distance_vel(t)
+    distance_acc(t)
+end
+measured_states = reduce(vcat, Symbolics.scalarize.(measured_states))
 unknowns = KiteModels.get_nonstiff_unknowns(s_plant)
 lin_outputs = unique([
     measured_states
@@ -65,45 +72,35 @@ stabilize!(s_model)
 stabilize!(s_plant)
 
 # https://github.com/SciML/ModelingToolkit.jl/issues/3552#issuecomment-2817642041
-function f(x, u, _, p)
+function f_plant(x, u, _, p)
     p.set_x(p.integ, x)
     p.set_u(p.integ, u)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     OrdinaryDiffEq.step!(p.integ, dt)
     # plot_kite(p.s, iter; zoom=true)
-    if !successful_retcode(p.integ.sol)
-        @show x u p.sx
-        @assert successful_retcode(p.integ.sol)
-    end
+    @assert successful_retcode(p.integ.sol)
     xnext = p.get_x(p.integ)
-    !successful_retcode(p.integ.sol) && (xnext .= NaN)
     return xnext
 end
 
-function h(x, _, p)
+function h_plant(x, _, p)
     p.set_x(p.integ, x)
     y = p.get_y(p.integ)
+    # y[p.y_idxs[sys.turn_rate[1]]] = 0.0
+    # y[p.y_idxs[sys.turn_rate[2]]] = 0.0
+    # y[p.y_idxs[sys.turn_acc[1]]] = 0.0
+    # y[p.y_idxs[sys.turn_acc[2]]] = 0.0
+    # y[p.y_idxs[sys.distance_vel]] = 0.0
+    # y[p.y_idxs[sys.distance_acc]] = 0.0
     return y
 end
 
 p_model = ModelParams(s_model, lin_outputs)
 p_plant = ModelParams(s_plant, lin_outputs)
 
-nu, nx, ny = length(p_model.u_vec), length(p_model.x_vec), length(p_model.y_vec)
-vx, vu, vy = string.(p_model.x_vec), string.(p_model.u_vec), string.(p_model.y_vec)
-model = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_model, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-setstate!(model, p_model.x0)
-
 nu, nx, ny = length(p_plant.u_vec), length(p_plant.x_vec), length(p_plant.y_vec)
 vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_vec)
-plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
-
-Hp, Hc, Mwt = 50, 2, fill(0.0, model.ny)
-Nwt = [0.01, 0.1, 0.1]
-Mwt[p_model.y_idxs[sys.tether_length[1]]] = 10.0
-Mwt[p_model.y_idxs[sys.tether_length[2]]] = 1.0
-Mwt[p_model.y_idxs[sys.tether_length[3]]] = 1.0
-Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
+plant = setname!(NonLinModel(f_plant, h_plant, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
 function calc_dsys(s, u, y)
@@ -127,31 +124,37 @@ function calc_dsys(s, u, y)
         else
             tsys = csys
         end
-        dsys = c2d(tsys, dt)
+        dsys = c2d(tsys, dt, :zoh)
+        dsys = minreal(dsys)
     end
     # @assert norm(dsys.D) ≈ 0
     return dsys, vsm_t, lin_t
 end
 
-nonstiff_idxs = [p_model.y_idxs[sym] for sym in unknowns]
-measured_idxs = [p_model.y_idxs[sym] for sym in measured_states]
-dsys, _, _ = calc_dsys(s_model, p_model.u0, p_model.y0[nonstiff_idxs])
+i_nonstiff = [p_model.y_idxs[sym] for sym in unknowns]
+i_ym = [p_model.y_idxs[sym] for sym in measured_states]
+dsys, _, _ = calc_dsys(s_model, p_model.u0, p_model.y0[i_nonstiff])
 linmodel = ModelPredictiveControl.LinModel(dsys.A, dsys.B, dsys.C, dsys.B[:,end:end-1], dsys.D[:,end:end-1], dt)
 setname!(linmodel; u=vu, y=vy)
 setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
 display(linmodel.A); display(linmodel.Bu)
 
+Hp, Hc, Mwt = 50, 2, fill(0.0, linmodel.ny)
+Nwt = [0.01, 0.1, 0.1]
+Mwt[p_model.y_idxs[sys.tether_length[1]]] = 10.0
+Mwt[p_model.y_idxs[sys.tether_length[2]]] = 1.0
+Mwt[p_model.y_idxs[sys.tether_length[3]]] = 1.0
+Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
+
 # Parameter	Lower Value Means	        Higher Value Means
 # R	        Less noisy measurements	    More noisy measurements
 # Q	        Less noisy model	        More noisy model
-σR = zeros(linmodel.ny)
-σR[nonstiff_idxs] .= 1e12
-σR[measured_idxs] .= 0.1
-σQ = fill(1.0, linmodel.nx)
+σR = fill(0.1, length(i_ym))
+σQ = fill(0.01, linmodel.nx)
 σQint_u = fill(0.1, linmodel.nu)
 nint_u = fill(1, linmodel.nu)
 umin, umax = [-100, -20, -20], [0, 0, 0]
-estim = KalmanFilter(linmodel; σQ, σR, nint_u, σQint_u)
+estim = KalmanFilter(linmodel; i_ym, σQ, σR, nint_u, σQint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
@@ -159,11 +162,11 @@ mpc = setconstraint!(mpc; umin, umax)
 KiteModels.linearize_vsm!(p_model.s)
 KiteModels.linearize_vsm!(p_plant.s)
 
-function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(ny))
+function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(plant.ny))
     U_data, Y_data, Ry_data, X̂_data, Ŷ_data = 
         zeros(linmodel.nu, N), zeros(linmodel.ny, N), zeros(linmodel.ny, N), zeros(linmodel.nx, N), zeros(linmodel.ny, N)
     setstate!(plant, px0)
-    initstate!(mpc, p_model.u0, plant())
+    initstate!(mpc, p_model.u0, plant()[i_ym])
     setstate!(mpc, x̂0)
     println("\nStarting simulation...")
     println("─"^80)
@@ -179,10 +182,10 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
     for i = 1:N
         t = @elapsed begin
             y = plant() + y_step
-            x̂ = preparestate!(mpc, y)[1:length(x0)]
+            x̂ = preparestate!(mpc, y[i_ym])[1:length(x0)]
             u = moveinput!(mpc, ry)
 
-            dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[nonstiff_idxs])
+            dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
             linmodel.A .= dsys.A
             linmodel.Bu .= dsys.B
             linmodel.C .= dsys.C
@@ -190,7 +193,7 @@ function sim_adapt!(mpc, nonlinmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(
             setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂, mpc.ŷ
-            mpc_t = @elapsed updatestate!(mpc, u, y) # update mpc state estimate
+            mpc_t = @elapsed updatestate!(mpc, u, y[i_ym]) # update mpc state estimate
         end
 
         KiteModels.linearize_vsm!(p_plant.s)
@@ -219,12 +222,17 @@ ry = p_model.y0
 x0 = zeros(linmodel.nx)
 x̂0 = [
     x0
-    p_model.y0
+    p_model.y0[i_ym]
 ]
-res = sim_adapt!(mpc, model, N, ry, plant, x0, p_plant.x0, x̂0)
+x̂0 = zeros(estim.nx̂)
+res = sim_adapt!(mpc, linmodel, N, ry, plant, x0, p_plant.x0, x̂0)
 y_idxs = [
     findall(x -> x != 0.0, Mwt)
-    [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
+    # [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
+    # p_model.y_idxs[sys.azimuth]
+    p_model.y_idxs[sys.kite_pos[1]]
+    p_model.y_idxs[sys.kite_pos[3]]
+    p_model.y_idxs[sys.distance_vel]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
     plotxwithx̂=false,
