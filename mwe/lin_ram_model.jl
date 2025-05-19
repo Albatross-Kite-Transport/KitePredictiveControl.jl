@@ -15,7 +15,8 @@ using Timers
 tic()
 @info "Loading packages "
 
-using KiteModels, LinearAlgebra, Statistics, OrdinaryDiffEqCore 
+using KiteModels, LinearAlgebra, Statistics, OrdinaryDiffEq
+using KiteModels: linearize
 using ModelingToolkit: t_nounits as t
 using ModelingToolkit
 using ControlSystems
@@ -23,20 +24,18 @@ using RobustAndOptimalControl
 using Plots
 # using ControlPlots
 
-# TODO: figure out bodeplots https://juliacontrol.github.io/ControlSystemsMTK.jl/dev/batch_linearization/#Linearize-around-a-trajectory
+# TODO: THE VSM MODEL IS NOT HERE... FIX LINEARISATION OF THE VSM MODEL
 
 toc()
 
 # include(joinpath(@__DIR__, "plotting.jl"))
 
 # Simulation parameters
-dt = 0.001
-total_time = 1.0  # Seconds of simulation after stabilization
-vsm_interval = 3
+dt = 0.005
+total_time = 40.0  # Seconds of simulation after stabilization
+vsm_interval = 0
 steps = Int(round(total_time / dt))
 trunc = false
-steering_freq = 1/2  # Hz - full left-right cycle frequency
-steering_magnitude = 1.0      # Magnitude of steering input [Nm]
 
 # Initialize model
 set_data_path(joinpath(dirname(@__DIR__), "data"))
@@ -52,17 +51,18 @@ toc()
 measure = Measurement()
 
 # Define outputs for linearization - angular velocities
-@variables ω_b(t)[1:3]
+@variables heading_x(t)
 @variables winch_force(t)[1:3]
+@variables tether_length(t)[1:3]
 
 # Initialize at elevation with linearization outputs
 s.point_system.winches[2].tether_length += 0.2
 s.point_system.winches[3].tether_length += 0.2
-measure.sphere_pos .= deg2rad.([60.0 60.0; 1.0 -1.0])
+measure.sphere_pos .= deg2rad.([75.0 75.0; 1.0 -1.0])
 KiteModels.init_sim!(s, measure; 
     remake=false,
     reload=true,
-    lin_outputs=[ω_b, winch_force...]  # Specify which outputs to track in linear model
+    lin_outputs=[heading_x, winch_force..., tether_length...]  # Specify which outputs to track in linear model
 )
 sys = s.sys
 
@@ -75,13 +75,20 @@ toc()
 @info "Stabilizing system at operating point..."
 s.integrator.ps[sys.stabilize] = true
 stabilization_steps = Int(10 ÷ dt)
+# stabilization_steps = 0
 for i in 1:stabilization_steps
     next_step!(s; dt, vsm_interval=0.05÷dt)
 end
 s.integrator.ps[sys.stabilize] = false
+# for i in 1:stabilization_steps÷2
+#     nl_steering = P * (0 - s.integrator[sys.heading_x])
+#     nl_u = -s.set.drum_radius .* s.integrator[sys.winch_force] .+ [0, -nl_steering, nl_steering]
+#     (t_new, _) = next_step!(s, nl_u; dt, vsm_interval=vsm_interval)
+# end
 
 # --- Get operating point values ---
-u_op = copy(s.integrator[sys.set_values])
+u_op = copy(-s.set.drum_radius .* s.integrator[sys.winch_force])
+s.set_set_values(s.integrator, u_op)
 sys_state_op = KiteModels.SysState(s)
 x_op = copy(s.integrator.u)
 
@@ -93,7 +100,6 @@ logger_linear = Logger(length(s.point_system.points), steps)  # Same structure f
 sys_state_nonlinear = KiteModels.SysState(s)
 sys_state_linear = deepcopy(sys_state_op) # Initialize linear state to operating point
 
-P = 10.0
 
 function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
     simulation_time_points = Float64[]
@@ -101,28 +107,33 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
     
     @info "Starting side-by-side simulation..."
     matrices = KiteModels.linearize(s)
+    
     csys = ss(matrices...)
-    dsys = c2d(csys, dt)
     if trunc
-        tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=20)
+        tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=26)
         wanted_nx = count(x -> x > 1e-4, hs)
         @info "Nx should be $wanted_nx"
     else
-        tsys = dsys
+        tsys = csys
     end
+    dsys = c2d(tsys, dt)
 
-    lin_u = copy(u_op)
-    x_lin = zeros(tsys.nx)
+    P = 1000.0
+    setpoint = deg2rad(-0)
+    lin_u = copy(u_op) .- 0.1
+    x_lin = zeros(dsys.nx)
     sim_time = 0.0
     try
         for i in 1:steps
+            if sim_time > 20
+                setpoint = deg2rad(0.2)
+            end
             push!(simulation_time_points, sim_time)
             # plot_kite(s, sim_time; zoom=false, front=false)
 
             # --- Calculate steering inputs ---
-            nl_steering = P * s.integrator[sys.ω_b[3]]
-            nl_u = -s.set.drum_radius .* s.integrator[sys.winch_force] .+ [0, -nl_steering, nl_steering]
-            s.lin_prob.ps[sys.set_values] = u_op
+            nl_steering = P * (setpoint - s.integrator[sys.heading_x])
+            nl_u = -s.set.drum_radius .* s.integrator[sys.winch_force] .+ [0, nl_steering, -nl_steering]
 
             # --- Nonlinear simulation step ---
             (t_new, _) = next_step!(s, nl_u; dt, vsm_interval=vsm_interval)
@@ -140,28 +151,31 @@ function simulate(sys_state_op, sys_state_nonlinear, sys_state_linear)
             # --- Linearize at operating point ---
             # if i%20 == 0
             #     (; A, B, C, D) = KiteModels.linearize(s)
-            #     @show norm(A)
             #     csys = ss(A, B, C, D)
             #     dsys = c2d(csys, dt)
             #     if trunc
-            #         tsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=tsys.nx)
+            #         dsys, hs, _ = baltrunc_unstab(dsys; residual=true, n=dsys.nx)
             #     else
-            #         tsys = dsys
+            #         dsys = dsys
             #     end
 
             #     # Reset operating point
             #     sys_state_op = KiteModels.SysState(s)
-            #     x_lin = zeros(tsys.nx) # Reset initial condition for lsim
+            #     x_lin .= 0.0
+            #     u_op .= s.get_set_values(s.integrator)
             # end
 
-            y_lin, t_lin, x_lin_ = lsim(tsys, u_matrix, t_vector; x0=x_lin)
-            x_lin .= x_lin_[:,end]
+            u_pert = lin_u .- u_op  # Input perturbation
+            xnext = dsys.A * x_lin .+ dsys.B * u_pert
+            y_lin = dsys.C * xnext .+ dsys.D * u_pert
+            x_lin .= xnext
 
             # Update linear system state
-            sys_state_linear.turn_rates[3] = sys_state_op.turn_rates[3] + y_lin[1,end] # Use the last output
-            sys_state_linear.force[1:3] .= sys_state_op.force[1:3] .+ y_lin[2:4,end]
-            lin_winch_force = y_lin[2:4,end]
-            lin_steering = P * y_lin[1,end]
+            sys_state_linear.heading = sys_state_op.heading + y_lin[1]
+            sys_state_linear.force[1:3] .= sys_state_op.force[1:3] .+ y_lin[2:4]
+            sys_state_linear.l_tether[1:3] .= sys_state_op.l_tether[1:3] .+ y_lin[5:7]
+            lin_winch_force = sys_state_linear.force[1:3]
+            lin_steering = P * (setpoint - sys_state_linear.heading)
             lin_u .= -s.set.drum_radius .* lin_winch_force .+ [0, lin_steering, -lin_steering]
 
             # Log the linear state
@@ -189,30 +203,28 @@ save_log(logger_nonlinear, "nonlinear_model")
 save_log(logger_linear, "linear_model")
 lg_nonlinear = load_log("nonlinear_model")
 lg_linear = load_log("linear_model")
-sl_nonlinear = lg_nonlinear.syslog
+sl_nl = lg_nonlinear.syslog
 sl_lin = lg_linear.syslog
 
 # --- Plot comparison results ---
-turn_rates_nl = [rad2deg(r[3]) for r in sl_nonlinear.turn_rates]
-turn_rates_lin = [rad2deg(r[3]) for r in sl_lin.turn_rates]
-winch_force_nl = [rad2deg(f[1]) for f in sl_nonlinear.force]
+heading_nl = rad2deg.(sl_nl.heading)
+heading_lin = rad2deg.(sl_lin.heading)
+winch_force_nl = [rad2deg(f[1]) for f in sl_nl.force]
 winch_force_lin = [rad2deg(f[1]) for f in sl_lin.force]
-t_common = sl_nonlinear.time
+tether_length_nl = [[l[i] for l in sl_nl.l_tether] for i in 1:3]
+tether_length_lin = [[l[i] for l in sl_lin.l_tether] for i in 1:3]
+
+t_common = sl_nl.time
 
 # Create Plots
-p1 = plot(t_common, [turn_rates_nl, turn_rates_lin], title="ω_z [°/s]", label=["Nonlinear" "Linear (lsim)"])
-p2 = plot(t_common, [winch_force_nl, winch_force_lin], title="winch_force [N]", label=["Nonlinear" "Linear (lsim)"])
-p3 = plot(t_common, [steering_history[1,:], steering_history[2,:]], title="Steering [Nm]", label=["Nonlin input", "Lin input"])
-bode = bodeplot([dsys[1,1], tsys[1,1]])
+p1 = plot(t_common, [heading_nl, heading_lin], title="heading [°]", label=["Nonlinear" "Linear"])
+p2 = plot(t_common, [winch_force_nl, winch_force_lin], title="Winch force [N]", label=["Nonlinear" "Linear"])
+p3 = plot(t_common, [tether_length_nl[1], tether_length_lin[1]], title="Tether length [m]", label=["Nonlinear" "Linear"])
+p4 = plot(t_common, [steering_history[1,:], steering_history[2,:]], title="Steering [Nm]", label=["Nonlinear" "Linear"])
+bode = bodeplot([dsys[1,1], csys[1,1]])
 
-p_comparison = plot(p1, p2, p3, bode, layout=(2,2), size=(1200, 1200))
+p_comparison = plot(p1, p2, p3, p4, bode, layout=(3,2), size=(1200, 1200))
 # p_comparison = plot(bode1, bode2, size=(1800, 1200))
 
 display(p_comparison)
 
-# --- Error metrics ---
-error_ω_x = norm(ω_x[1,:] - ω_x[2,:]) / length(t_common)
-error_ω_y = norm(ω_y[1,:] - ω_y[2,:]) / length(t_common)
-error_ω_z = norm(ω_z[1,:] - ω_z[2,:]) / length(t_common)
-
-@info "Error metrics (avg. L2 norm):" error_ω_x error_ω_y error_ω_z
