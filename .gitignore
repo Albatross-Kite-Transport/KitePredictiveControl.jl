@@ -3,3 +3,5 @@ Manifest.toml
 *.jld2
 *.bin
 prob.bin
+*.arrow
+*.png

@@ -33,7 +33,7 @@ toc()
 
 # Simulation parameters
 dt = 0.05
-total_time = 1.0  # Seconds of simulation after stabilization
+total_time = 100.0  # Seconds of simulation after stabilization
 vsm_interval = 0
 steps = Int(round(total_time / dt))
 trunc = false
@@ -119,7 +119,7 @@ function simulate(ss_op, ss_nl, ss_lin)
     end
     dsys = c2d(tsys, dt)
 
-    nl_steering_pid, lin_steering_pid = [DiscretePID(; K=10, Ts=dt) for _ in 1:2]
+    nl_steering_pid, lin_steering_pid = [DiscretePID(; K=100, Ts=dt) for _ in 1:2]
     nl_power_pid, lin_power_pid = [DiscretePID(; K=100, Ti=10, Ts=dt) for _ in 1:2]
     nl_line_pid, lin_line_pid = [DiscretePID(; K=100, Ti=10, Ts=dt) for _ in 1:2]
     setpoint = deg2rad(-0)
@@ -131,21 +131,21 @@ function simulate(ss_op, ss_nl, ss_lin)
     sim_time = 0.0
     try
         for i in 1:steps
-            # if i == steps ÷ 2
-            #     setpoint = deg2rad(0.2)
-            #     csys = ss(matrices...)
-            #     if trunc
-            #         tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=26)
-            #         wanted_nx = count(x -> x > 1e-4, hs)
-            #         @info "Nx should be $wanted_nx"
-            #     else
-            #         tsys = csys
-            #     end
-            #     dsys = c2d(tsys, dt)
-            #     lin_u = copy(u_op) # Start with operating point input
-            #     x_lin = zeros(dsys.nx) # State deviation for the discrete linear system
-            #     ss_op = SysState(s)
-            # end
+            if i == steps ÷ 2
+                setpoint = deg2rad(10)
+                # csys = ss(matrices...)
+                # if trunc
+                #     tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=26)
+                #     wanted_nx = count(x -> x > 1e-4, hs)
+                #     @info "Nx should be $wanted_nx"
+                # else
+                #     tsys = csys
+                # end
+                # dsys = c2d(tsys, dt)
+                # lin_u = copy(u_op) # Start with operating point input
+                # x_lin = zeros(dsys.nx) # State deviation for the discrete linear system
+                # ss_op = SysState(s)
+            end
             push!(simulation_time_points, sim_time)
 
             # --- Nonlinear simulation step ---
@@ -228,7 +228,8 @@ t_common = sl_nl.time
 # Create Plots
 p1 = plot(t_common, [heading_nl, heading_lin], title="heading [°]", label=["Nonlinear" "Linear"])
 p2 = plot(t_common, [winch_force_nl, winch_force_lin], title="Winch force [N]", label=["Nonlinear" "Linear"])
-p3 = plot(t_common, [tether_length_nl[1], tether_length_lin[1]], title="Tether length [m]", label=["Nonlinear" "Linear"])
+p3 = plot(t_common, [tether_length_nl[1], tether_length_lin[1], tether_length_nl[2], tether_length_lin[2]], 
+            title="Tether length [m]", label=["Nonlinear power" "Linear power" "Nonlinear steering" "Linear steering"])
 p4 = plot(t_common, [steering_history[1,:], steering_history[2,:]], title="Steering [Nm]", label=["Nonlinear" "Linear"])
 bode = bodeplot([dsys[2,2], csys[2,2]], label=["discrete sys" "continuous sys"])
 
