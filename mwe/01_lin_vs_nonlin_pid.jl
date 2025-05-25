@@ -42,7 +42,7 @@ trunc = false
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 set = load_settings("system_model.yaml")
 set_values = [-60.0, 0.0, 0.0]  # Set values of the torques of the three winches. [Nm]
-set.quasi_static = false
+set.quasi_static = true
 set.physical_model = "ram"
 
 @info "Creating RamAirKite model..."
@@ -119,7 +119,7 @@ function simulate(ss_op, ss_nl, ss_lin)
     end
     dsys = c2d(tsys, dt)
 
-    nl_steering_pid, lin_steering_pid = [DiscretePID(; K=100, Ts=dt) for _ in 1:2]
+    nl_steering_pid, lin_steering_pid = [DiscretePID(; K=10, Ti=5, Ts=dt) for _ in 1:2]
     nl_power_pid, lin_power_pid = [DiscretePID(; K=100, Ti=10, Ts=dt) for _ in 1:2]
     nl_line_pid, lin_line_pid = [DiscretePID(; K=100, Ti=10, Ts=dt) for _ in 1:2]
     setpoint = deg2rad(-0)
@@ -132,19 +132,26 @@ function simulate(ss_op, ss_nl, ss_lin)
     try
         for i in 1:steps
             if i == steps ÷ 2
-                setpoint = deg2rad(10)
-                # csys = ss(matrices...)
-                # if trunc
-                #     tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=26)
-                #     wanted_nx = count(x -> x > 1e-4, hs)
-                #     @info "Nx should be $wanted_nx"
-                # else
-                #     tsys = csys
-                # end
-                # dsys = c2d(tsys, dt)
-                # lin_u = copy(u_op) # Start with operating point input
-                # x_lin = zeros(dsys.nx) # State deviation for the discrete linear system
-                # ss_op = SysState(s)
+                setpoint = deg2rad(5)
+                csys = ss(matrices...)
+                if trunc
+                    tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=26)
+                    wanted_nx = count(x -> x > 1e-4, hs)
+                    @info "Nx should be $wanted_nx"
+                else
+                    tsys = csys
+                end
+                dsys = c2d(tsys, dt)
+                lin_u = copy(u_op) # Start with operating point input
+                x_lin = zeros(dsys.nx) # State deviation for the discrete linear system
+                ss_op = SysState(s)
+                ss_lin = SysState(s)
+                nl_steering_pid.I = 0.0
+                lin_steering_pid.I = 0.0
+                nl_power_pid.I = 0.0
+                lin_power_pid.I = 0.0
+                nl_line_pid.I = 0.0
+                lin_line_pid.I = 0.0
             end
             push!(simulation_time_points, sim_time)
 
@@ -200,10 +207,10 @@ function simulate(ss_op, ss_nl, ss_lin)
             rethrow(e)
         end
     end
-    return simulation_time_points, steering_history, csys, dsys, tsys
+    return simulation_time_points, steering_history, csys, dsys, tsys, nl_power_pid
 end
 
-simulation_time_points, steering_history, csys, dsys, tsys = simulate(ss_op, ss_nl, ss_lin)
+simulation_time_points, steering_history, csys, dsys, tsys, nl_power_pid = simulate(ss_op, ss_nl, ss_lin)
 
 @info "Simulation completed"
 
