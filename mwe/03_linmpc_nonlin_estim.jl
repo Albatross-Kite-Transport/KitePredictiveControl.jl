@@ -177,6 +177,7 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
         rpad("VSM", 12),
         rpad("Lin", 12),
         rpad("MPC", 12),
+        rpad("Estim", 12),
         "Norm(A)"
     )
     println("─"^80)
@@ -186,7 +187,7 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
             x̂ = preparestate!(estim, y[i_ym])
             # preparestate!(mpc, y[i_ym])
             setstate!(mpc, x̂)
-            u = moveinput!(mpc, ry)
+            mpc_t = @elapsed u = moveinput!(mpc, ry)
 
             dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
             linmodel.A .= dsys.A
@@ -196,7 +197,7 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
             setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂[1:length(x0)], mpc.ŷ
-            x̂ = updatestate!(estim, u, y[i_ym])       # update UKF state estimate
+            estim_t = @elapsed x̂ = updatestate!(estim, u, y[i_ym])       # update UKF state estimate
             # updatestate!(mpc, u, y)             # CHANGED: do nothing at all, can be omitted
             setstate!(mpc, x̂)                   # update MPC with the UKF updated state
         end
@@ -205,8 +206,8 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
         updatestate!(plant, u)
         # plot_kite(s_plant, i-1; zoom=true)
 
-        @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %.2e\n",
-            i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, norm(linmodel.A))
+        @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %8.1fx │ %.2e\n",
+            i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, dt/estim_t, norm(linmodel.A))
     end
     res = SimResult(mpc, U_data, Y_data; Ry_data, X̂_data, Ŷ_data)
     return res
