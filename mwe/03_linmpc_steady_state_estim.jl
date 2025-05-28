@@ -19,7 +19,7 @@ include("plotting.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
-N = 100
+N = 10
 trunc = false
 
 # Initialize model
@@ -77,44 +77,45 @@ function set_y!(p::ModelParams, y)
     tether_length   = y[7:9]
     tether_vel      = y[10:12]
 
+    @show tether_length
+
     # get variables from integrator
     distance = p.get_state(p.integ)
     R_t_w = KiteModels.calc_R_t_w(elevation, azimuth) # rotation of tether to world, similar to view rotation, but always pointing up
-
+    
     # get kite_pos, rotate it by elevation and azimuth around the x and z axis
-    kite_pos = R_t_w * [distance, 0, 0]
+    kite_pos = R_t_w * [0, 0, distance]
     # kite_vel from elevation_vel and azimuth_vel
     kite_vel = R_t_w * [-elevation_vel, azimuth_vel, 0]
     # find quaternion orientation from heading, R_cad_body and R_t_w
-    x = [0, sin(heading), -cos(heading)]
-    y = [0, cos(heading),  sin(heading)]
-    z = [1, 0, 0]
+    x = [cos(heading), -sin(heading), 0]
+    y = [sin(heading),  cos(heading), 0]
+    z = [0, 0, 1]
     R_b_w = p.s.wing.R_cad_body * R_t_w * [x y z]
     Q_b_w = rotation_matrix_to_quaternion(R_b_w)
     # adjust the turn rates for observed turn rate
     ω_b = R_b_w' * R_t_w * [0, 0, turn_rate]
     # directly set tether length
     # directly set tether vel
-
     p.set_state(p.integ, [kite_pos, kite_vel, Q_b_w, ω_b, tether_length, tether_vel])
-    plot(p.s)
+    display(plot(p.s))
     return nothing
 end
 
-function preparestate!(p::ModelParams, y)
+function ModelPredictiveControl.preparestate!(p::ModelParams, y)
     set_y!(p, y)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     stabilize!(p.s, 1.0)
     return p.get_x(p.integ)
 end
 
-function updatestate!(p::ModelParams, u, y)
-    set_y!(p, y)
-    p.set_u(p.integ, u)
-    OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
-    stabilize!(p.s, 0.1)
-    OrdinaryDiffEq.step!(p.integ, dt)
-    @assert successful_retcode(p.integ.sol)
+function ModelPredictiveControl.updatestate!(p::ModelParams, u, y)
+    # set_y!(p, y)
+    # p.set_u(p.integ, u)
+    # OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
+    # OrdinaryDiffEq.step!(p.integ, dt)
+    # @assert successful_retcode(p.integ.sol)
+    # stabilize!(p.s, 0.1)
     return p.get_x(p.integ)
 end
 
@@ -197,12 +198,12 @@ Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 # Parameter	Lower Value Means	        Higher Value Means
 # R	        Less noisy measurements	    More noisy measurements
 # Q	        Less noisy model	        More noisy model
-σR = fill(0.1, length(i_ym))
-σQ = fill(0.01, linmodel.nx)
-σQint_u = fill(0.1, linmodel.nu)
-nint_u = fill(1, linmodel.nu)
+# σR = fill(0.1, length(i_ym))
+# σQ = fill(0.01, linmodel.nx)
+# σQint_u = fill(0.1, linmodel.nu)
+# nint_u = fill(1, linmodel.nu)
 umin, umax = [-100, -20, -20], [0, 0, 0]
-man = ManualEstimator(linmodel; i_ym, nint_u)
+man = ManualEstimator(linmodel; i_ym, nint_u=0, nint_ym=0)
 mpc = LinMPC(man; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
@@ -227,18 +228,20 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
     )
     println("─"^80)
     for i = 1:N
+        @show i
         t = @elapsed begin
             y = plant() + y_step
             estim_t = @elapsed x̂ = preparestate!(p_model, y[i_ym])
             setstate!(mpc, x̂)
             mpc_t = @elapsed u = moveinput!(mpc, ry)
 
-            dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
-            linmodel.A .= dsys.A
-            linmodel.Bu .= dsys.B
-            linmodel.C .= dsys.C
-            setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
-            setmodel!(mpc, linmodel)
+            vsm_t, lin_t = Inf, Inf
+            # dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
+            # linmodel.A .= dsys.A
+            # linmodel.Bu .= dsys.B
+            # linmodel.C .= dsys.C
+            # setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
+            # setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂[1:length(x0)], mpc.ŷ
             estim_t += @elapsed x̂ = updatestate!(p_model, u, y[i_ym])       # update UKF state estimate
@@ -247,7 +250,6 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
 
         KiteModels.linearize_vsm!(p_plant.s)
         updatestate!(plant, u)
-        # plot_kite(s_plant, i-1; zoom=true)
 
         @printf("%4d │ %8.3fx │ %8.3fx │ %8.3fx │ %8.1fx │ %8.1fx │ %.2e\n",
             i, dt/t, dt/vsm_t, dt/lin_t, dt/mpc_t, dt/estim_t, norm(linmodel.A))
@@ -268,12 +270,11 @@ y_idxs = [
     findall(x -> x != 0.0, Mwt)
     # [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
     # p_model.y_idxs[sys.azimuth]
-    p_model.y_idxs[sys.kite_pos[1]]
-    p_model.y_idxs[sys.kite_pos[3]]
-    p_model.y_idxs[sys.distance_vel]
+    p_model.y_idxs[sys.heading]
+    # p_model.y_idxs[sys.kite_pos[3]]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
-    plotxwithx̂=false,
+    plotxwithx̂=[141],
     plotŷ=true,
     plotu=true, size=(900, 900)
 )

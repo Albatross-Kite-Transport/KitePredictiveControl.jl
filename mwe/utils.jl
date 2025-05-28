@@ -27,7 +27,7 @@ struct ModelParams{G1,G2,G3}
         #     s.sys.elevation
         #     s.sys.azimuth
         # ]
-        x_vec = KiteModels.get_unknowns(s_model)
+        x_vec = ModelingToolkit.unknowns(s.sys)
         u_vec = [s.sys.set_values[i] for i in 1:3]
 
         set_x = setu(s.integrator, x_vec)
