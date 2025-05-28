@@ -25,7 +25,7 @@ include("plotting.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
-N = 10
+N = 100
 trunc = false
 
 # Initialize model
@@ -83,8 +83,6 @@ function set_y!(p::ModelParams, y)
     tether_length   = y[7:9]
     tether_vel      = y[10:12]
 
-    @show tether_length
-
     # get variables from integrator
     distance = p.get_state(p.integ)
     R_t_w = KiteModels.calc_R_t_w(elevation, azimuth) # rotation of tether to world, similar to view rotation, but always pointing up
@@ -111,7 +109,7 @@ end
 function ModelPredictiveControl.preparestate!(p::ModelParams, y)
     set_y!(p, y)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
-    stabilize!(p.s, 1.0)
+    stabilize!(p.s, 0.1)
     return p.get_x(p.integ) .- p.x0
 end
 
@@ -132,7 +130,6 @@ function f(x, u, _, p)
     p.set_u(p.integ, u)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     OrdinaryDiffEq.step!(p.integ, dt)
-    # plot_kite(p.s, iter; zoom=true)
     @assert successful_retcode(p.integ.sol)
     xnext = p.get_x(p.integ)
     return xnext
@@ -141,12 +138,6 @@ end
 function h(x, _, p)
     p.set_x(p.integ, x)
     y = p.get_y(p.integ)
-    # y[p.y_idxs[sys.turn_rate[1]]] = 0.0
-    # y[p.y_idxs[sys.turn_rate[2]]] = 0.0
-    # y[p.y_idxs[sys.turn_acc[1]]] = 0.0
-    # y[p.y_idxs[sys.turn_acc[2]]] = 0.0
-    # y[p.y_idxs[sys.distance_vel]] = 0.0
-    # y[p.y_idxs[sys.distance_acc]] = 0.0
     return y
 end
 
@@ -158,24 +149,19 @@ vx, vu, vy = string.(p_plant.x_vec), string.(p_plant.u_vec), string.(p_plant.y_v
 plant = setname!(NonLinModel(f, h, dt, nu, nx, ny; p=p_plant, solver=nothing, jacobian=ad_type); u=vu, x=vx, y=vy)
 
 # TODO: linearize on a different core https://www.perplexity.ai/search/using-a-julia-scheduler-run-tw-oKloXmWmSR6YWb47nW_1Gg#0
-function calc_dsys(s, u, y)
+function calc_dsys(p::ModelParams, x, u, y)
     vsm_t = @elapsed begin
-        s.set_nonstiff(s.integrator, y)
-        OrdinaryDiffEq.reinit!(s.integrator, s.integrator.u; reinit_dae=false)
-        s.integrator.ps[s.sys.fix_nonstiff] = true
-        next_step!(s, u)
-        s.integrator.ps[s.sys.fix_nonstiff] = false
+        # OrdinaryDiffEq.reinit!(p.integ, x; reinit_dae=false)
+        KiteModels.linearize_vsm!(p.s)
     end
-
-    # either use y to find full nonstiff state
-    # or have y contain the full nonstiff state
-
+    p.u0 .= u
+    p.y0 .= y
+    p.x0 .= p.get_x(p.integ)
     lin_t = @elapsed begin
-        (; A, B, C, D) = KiteModels.linearize(s)
+        (; A, B, C, D) = KiteModels.linearize(p.s)
         csys = ss(A, B, C, D)
         if trunc
             tsys, hs, _ = baltrunc_unstab(csys; residual=true, n=length(unknowns))
-            # tsys.D .= 0.0
         else
             tsys = csys
         end
@@ -188,7 +174,7 @@ end
 
 i_nonstiff = [p_model.y_idxs[sym] for sym in unknowns]
 i_ym = [p_model.y_idxs[sym] for sym in measured_states]
-dsys, _, _ = calc_dsys(s_model, p_model.u0, p_model.y0[i_nonstiff])
+dsys, _, _ = calc_dsys(p_model, p_model.x0, p_model.u0, p_model.y0)
 linmodel = ModelPredictiveControl.LinModel(dsys.A, dsys.B, dsys.C, dsys.B[:,end:end-1], dsys.D[:,end:end-1], dt)
 setname!(linmodel; u=vu, y=vy)
 setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
@@ -242,12 +228,12 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
             mpc_t = @elapsed u = moveinput!(mpc, ry)
 
             vsm_t, lin_t = Inf, Inf
-            # dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
-            # linmodel.A .= dsys.A
-            # linmodel.Bu .= dsys.B
-            # linmodel.C .= dsys.C
-            # setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
-            # setmodel!(mpc, linmodel)
+            dsys, vsm_t, lin_t = calc_dsys(p_model, x̂, u, y)
+            linmodel.A .= dsys.A
+            linmodel.Bu .= dsys.B
+            linmodel.C .= dsys.C
+            setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
+            setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂[1:length(x0)], mpc.ŷ
             estim_t += @elapsed x̂ = updatestate!(p_model, u, y[i_ym])       # update UKF state estimate
@@ -276,6 +262,7 @@ y_idxs = [
     findall(x -> x != 0.0, Mwt)
     # [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
     p_model.y_idxs[sys.kite_pos[3]]
+    # [p_model.y_idxs[sys.free_twist_angle[i]] for i in 1:4]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
     plotxwithx̂=false,
