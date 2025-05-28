@@ -3,11 +3,11 @@ Use a nonlinear MTK model with online linearization and a linear MPC using Model
 """
 
 using KiteModels, KiteUtils, LinearAlgebra
-using ModelPredictiveControl, ModelingToolkit, Plots, JuMP, Ipopt, OrdinaryDiffEq, DifferentiationInterface,
+using ModelPredictiveControl, ModelingToolkit, Plots, OrdinaryDiffEq, DifferentiationInterface,
     SymbolicIndexingInterface
 using ModelingToolkit: setu, setp, getu, getp, @variables
 using ModelingToolkit: t_nounits as t
-using KiteModels: rotate_around_y, rotate_around_z
+using KiteModels: rotate_around_y, rotate_around_z, rotation_matrix_to_quaternion
 using SciMLBase: successful_retcode
 using RobustAndOptimalControl
 using ControlSystems
@@ -15,6 +15,7 @@ using Plots
 using Printf
 
 include("utils.jl")
+include("plotting.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
 
 ad_type = AutoForwardDiff()
@@ -51,8 +52,7 @@ lin_outputs = unique([
     measured_states
     unknowns
 ])
-KiteModels.init_sim!(s_model, measure; remake=true, adaptive=false, lin_outputs)
-OrdinaryDiffEq.set_proposed_dt!(s_model.integrator, 0.01dt)
+KiteModels.init_sim!(s_model, measure; remake=false, adaptive=true, lin_outputs)
 
 function stabilize!(s, T=10)
     s.integrator.ps[s.sys.stabilize] = true
@@ -66,8 +66,7 @@ function stabilize!(s, T=10)
 end
 stabilize!(s_plant)
 
-
-function preparestate!(p::ModelParams, y)
+function set_y!(p::ModelParams, y)
     # get variables from y
     elevation       = y[1]
     elevation_vel   = y[2]
@@ -84,7 +83,6 @@ function preparestate!(p::ModelParams, y)
 
     # get kite_pos, rotate it by elevation and azimuth around the x and z axis
     kite_pos = R_t_w * [distance, 0, 0]
-    p.set_kite_pos(p.integ, kite_pos)
     # kite_vel from elevation_vel and azimuth_vel
     kite_vel = R_t_w * [-elevation_vel, azimuth_vel, 0]
     # find quaternion orientation from heading, R_cad_body and R_t_w
@@ -99,8 +97,24 @@ function preparestate!(p::ModelParams, y)
     # directly set tether vel
 
     p.set_state(p.integ, [kite_pos, kite_vel, Q_b_w, ω_b, tether_length, tether_vel])
+    plot(p.s)
+    return nothing
+end
+
+function preparestate!(p::ModelParams, y)
+    set_y!(p, y)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     stabilize!(p.s, 1.0)
+    return p.get_x(p.integ)
+end
+
+function updatestate!(p::ModelParams, u, y)
+    set_y!(p, y)
+    p.set_u(p.integ, u)
+    OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
+    stabilize!(p.s, 0.1)
+    OrdinaryDiffEq.step!(p.integ, dt)
+    @assert successful_retcode(p.integ.sol)
     return p.get_x(p.integ)
 end
 
@@ -200,7 +214,6 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
         zeros(linmodel.nu, N), zeros(linmodel.ny, N), zeros(linmodel.ny, N), zeros(linmodel.nx, N), zeros(linmodel.ny, N)
     setstate!(plant, px0)
     initstate!(mpc, p_model.u0, plant()[i_ym])
-    setstate!(mpc, x̂0)
     println("\nStarting simulation...")
     println("─"^80)
     println(
@@ -216,8 +229,7 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
     for i = 1:N
         t = @elapsed begin
             y = plant() + y_step
-            x̂ = preparestate!(p_model, y[i_ym])
-            # preparestate!(mpc, y[i_ym])
+            estim_t = @elapsed x̂ = preparestate!(p_model, y[i_ym])
             setstate!(mpc, x̂)
             mpc_t = @elapsed u = moveinput!(mpc, ry)
 
@@ -229,8 +241,7 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
             setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂[1:length(x0)], mpc.ŷ
-            estim_t = @elapsed x̂ = updatestate!(estim, u, y[i_ym])       # update UKF state estimate
-            # updatestate!(mpc, u, y)             # CHANGED: do nothing at all, can be omitted
+            estim_t += @elapsed x̂ = updatestate!(p_model, u, y[i_ym])       # update UKF state estimate
             setstate!(mpc, x̂)                   # update MPC with the UKF updated state
         end
 
@@ -249,12 +260,9 @@ ry = p_model.y0
 # ry[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 # ry[p_model.y_idxs[sys.angle_of_attack]] = deg2rad(10)
 
-x0 = zeros(linmodel.nx)
-x̂0 = [
-    x0
-    p_model.y0[i_ym]
-]
-x̂0 = zeros(estim.nx̂)
+x0 = p_model.get_x(p_model.integ)
+x̂0 = x0
+# x̂0 = zeros(estim.nx̂)
 res = sim_adapt!(mpc, linmodel, N, ry, plant, x0, p_plant.x0, x̂0)
 y_idxs = [
     findall(x -> x != 0.0, Mwt)
