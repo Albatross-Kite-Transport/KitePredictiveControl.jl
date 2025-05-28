@@ -37,18 +37,12 @@ sys = s_plant.sys
 measured_states = @variables begin
     elevation(t)
     elevation_vel(t)
-    elevation_acc(t)
     azimuth(t)
     azimuth_vel(t)
-    azimuth_acc(t)
-    heading_x(t)
-    turn_rate(t)[1:3]
-    turn_acc(t)[1:3]
+    heading(t)
+    turn_rate(t)[1]
     tether_length(t)[1:3]
     tether_vel(t)[1:3]
-    distance(t) # can only be approximated, but let's test
-    distance_vel(t)
-    distance_acc(t)
 end
 measured_states = reduce(vcat, Symbolics.scalarize.(measured_states))
 unknowns = KiteModels.get_nonstiff_unknowns(s_plant)
@@ -150,11 +144,10 @@ Mwt[p_model.y_idxs[sys.kite_pos[2]]] = 1.0
 # R	        Less noisy measurements	    More noisy measurements
 # Q	        Less noisy model	        More noisy model
 σR = fill(0.1, length(i_ym))
-σQ = fill(0.01, linmodel.nx)
-σQint_u = fill(0.1, linmodel.nu)
-nint_u = fill(1, linmodel.nu)
+σQ = fill(1e-4, linmodel.nx)
+nint_u = 0
 umin, umax = [-100, -20, -20], [0, 0, 0]
-estim = KalmanFilter(linmodel; i_ym, σQ, σR, nint_u, σQint_u)
+estim = KalmanFilter(linmodel; i_ym, σQ, σR, nint_u)
 mpc = LinMPC(estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 mpc = setconstraint!(mpc; umin, umax)
 
@@ -185,12 +178,13 @@ function sim_adapt!(mpc, linmodel, N, ry, plant, x0, px0, x̂0, y_step=zeros(pla
             x̂ = preparestate!(mpc, y[i_ym])[1:length(x0)]
             u = moveinput!(mpc, ry)
 
-            dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
-            linmodel.A .= dsys.A
-            linmodel.Bu .= dsys.B
-            linmodel.C .= dsys.C
-            setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
-            setmodel!(mpc, linmodel)
+            vsm_t, lin_t = Inf, Inf
+            # dsys, vsm_t, lin_t = calc_dsys(s_model, u, y[i_nonstiff])
+            # linmodel.A .= dsys.A
+            # linmodel.Bu .= dsys.B
+            # linmodel.C .= dsys.C
+            # setop!(linmodel, uop=p_model.u0, yop=p_model.y0)
+            # setmodel!(mpc, linmodel)
 
             U_data[:,i], Y_data[:,i], Ry_data[:,i], X̂_data[:,i], Ŷ_data[:,i] = u, y, ry, x̂, mpc.ŷ
             mpc_t = @elapsed updatestate!(mpc, u, y[i_ym]) # update mpc state estimate
@@ -232,7 +226,6 @@ y_idxs = [
     # p_model.y_idxs[sys.azimuth]
     p_model.y_idxs[sys.kite_pos[1]]
     p_model.y_idxs[sys.kite_pos[3]]
-    p_model.y_idxs[sys.distance_vel]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
     plotxwithx̂=false,

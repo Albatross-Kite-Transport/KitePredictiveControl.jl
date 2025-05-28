@@ -14,6 +14,12 @@ using ControlSystems
 using Plots
 using Printf
 
+# TODO!!!
+"""
+Operating point of linmodel seems wrong, and heading is just wrong direction.
+Also see if changing x_vec solves all problems of 02_online_mtk_lin.jl
+"""
+
 include("utils.jl")
 include("plotting.jl")
 set_data_path(joinpath(dirname(@__DIR__), "data"))
@@ -88,8 +94,8 @@ function set_y!(p::ModelParams, y)
     # kite_vel from elevation_vel and azimuth_vel
     kite_vel = R_t_w * [-elevation_vel, azimuth_vel, 0]
     # find quaternion orientation from heading, R_cad_body and R_t_w
-    x = [cos(heading), -sin(heading), 0]
-    y = [sin(heading),  cos(heading), 0]
+    x = [cos(-heading), -sin(-heading), 0]
+    y = [sin(-heading),  cos(-heading), 0]
     z = [0, 0, 1]
     R_b_w = p.s.wing.R_cad_body * R_t_w * [x y z]
     Q_b_w = rotation_matrix_to_quaternion(R_b_w)
@@ -106,7 +112,7 @@ function ModelPredictiveControl.preparestate!(p::ModelParams, y)
     set_y!(p, y)
     OrdinaryDiffEq.reinit!(p.integ, p.integ.u; reinit_dae=false)
     stabilize!(p.s, 1.0)
-    return p.get_x(p.integ)
+    return p.get_x(p.integ) .- p.x0
 end
 
 function ModelPredictiveControl.updatestate!(p::ModelParams, u, y)
@@ -116,7 +122,7 @@ function ModelPredictiveControl.updatestate!(p::ModelParams, u, y)
     # OrdinaryDiffEq.step!(p.integ, dt)
     # @assert successful_retcode(p.integ.sol)
     # stabilize!(p.s, 0.1)
-    return p.get_x(p.integ)
+    return p.get_x(p.integ) .- p.x0
 end
 
 
@@ -269,12 +275,10 @@ res = sim_adapt!(mpc, linmodel, N, ry, plant, x0, p_plant.x0, x̂0)
 y_idxs = [
     findall(x -> x != 0.0, Mwt)
     # [p_model.y_idxs[sys.Q_b_w[i]] for i in 1:4]
-    # p_model.y_idxs[sys.azimuth]
-    p_model.y_idxs[sys.heading]
-    # p_model.y_idxs[sys.kite_pos[3]]
+    p_model.y_idxs[sys.kite_pos[3]]
 ]
 Plots.plot(res; plotx=false, ploty=y_idxs, 
-    plotxwithx̂=[141],
+    plotxwithx̂=false,
     plotŷ=true,
     plotu=true, size=(900, 900)
 )
