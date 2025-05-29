@@ -125,7 +125,6 @@ These can be passed as keyword arguments to the `plot` call:
         original_system_points_pos = [p.pos_w for p in sys.points]
 
         for seg in sys.segments
-            # `seg.points` is assumed to be a tuple of 1-based indices (e.g., (1, 2))
             p1_idx = seg.points[1] # Accesses seg.points
             p2_idx = seg.points[2]
 
@@ -140,8 +139,6 @@ These can be passed as keyword arguments to the `plot` call:
                         [original_system_points_pos[p1_idx][y_plot_idx], original_system_points_pos[p2_idx][y_plot_idx]]
                     )
                 end
-            else
-                # @warn "Segment indices ($p1_idx, $p2_idx) out of bounds for sys.points."
             end
         end
     end
