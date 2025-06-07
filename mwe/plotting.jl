@@ -132,7 +132,7 @@ These can be passed as keyword arguments to the `plot` call:
                 @series begin
                     seriestype := :path
                     linecolor --> :black
-                    linewidth --> 1.5
+                    linewidth --> 0.5
                     label := ""
                     (
                         [original_system_points_pos[p1_idx][x_plot_idx], original_system_points_pos[p2_idx][x_plot_idx]],
@@ -148,7 +148,7 @@ These can be passed as keyword arguments to the `plot` call:
         @series begin
             seriestype := :scatter
             markercolor --> :blue
-            markersize --> 3
+            markersize --> 1
             markerstrokecolor --> :match
             label := ""
             (
