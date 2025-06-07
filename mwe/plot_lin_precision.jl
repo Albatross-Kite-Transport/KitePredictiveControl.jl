@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
 
 function test_model(p)
     norms = Float64[]

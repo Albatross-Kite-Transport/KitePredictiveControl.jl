@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 using Revise, KitePredictiveControl, ControlPlots, KiteModels, KiteViewers
 
 # --- user constants ---

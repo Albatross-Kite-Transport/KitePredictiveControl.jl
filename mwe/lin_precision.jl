@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 using KiteModels, LinearAlgebra, ModelPredictiveControl, ModelingToolkit, OrdinaryDiffEq, FiniteDiff, DifferentiationInterface
 using ModelingToolkit: setu, setp, getu, getp
 using LaTeXStrings, ControlPlots, KiteUtils

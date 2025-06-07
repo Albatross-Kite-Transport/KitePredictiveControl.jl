@@ -1,2 +1,5 @@
-#!/bin/bash
+#!/bin/bash -eu
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+# SPDX-License-Identifier: MPL-2.0
+
 julia -J  bin/kitepredictivecontrol.so -t auto --project

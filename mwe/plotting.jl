@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 using RecipesBase
 
 function Plots.plot(s::RamAirKite; kwargs...)

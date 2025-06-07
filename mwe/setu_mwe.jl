@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 using ModelingToolkit, OrdinaryDiffEq
 using ModelingToolkit: D_nounits as D, t_nounits as t, setu, setp, getu, getp
 

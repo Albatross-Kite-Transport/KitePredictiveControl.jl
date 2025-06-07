@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 """
 Use a nonlinear MTK model with online linearization and a linear MPC using ModelPredictiveControl.jl
 """

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+#
+# SPDX-License-Identifier: MPL-2.0
+
 # https://juliacontrol.github.io/ControlSystems.jl/stable/examples/automatic_differentiation/
 
 using ControlSystemsBase, ForwardDiff, KiteModels, PreallocationTools, OrdinaryDiffEq, OrdinaryDiffEqCore, BenchmarkTools, ModelingToolkit
