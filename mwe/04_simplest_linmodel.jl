@@ -57,18 +57,20 @@ sys = ram_model.sys
 integ = ram_model.integrator
 ram_model.integrator.ps[sys.stabilize] = true
 
-y_vec = @variables begin
-    elevation(t)
-    elevation_vel(t)
-    azimuth(t)
-    azimuth_vel(t)
-    heading(t)
-    turn_rate(t)[3]
-    tether_length(t)[1:3]
-    tether_vel(t)[1:3]
-end
-y_vec = reduce(vcat, Symbolics.scalarize.(y_vec))
-
+y_vec = [
+    sys.elevation
+    sys.elevation_vel
+    sys.azimuth
+    sys.azimuth_vel
+    sys.heading
+    sys.turn_rate[3]
+    sys.tether_length[1]
+    sys.tether_length[2]
+    sys.tether_length[3]
+    sys.tether_vel[1]
+    sys.tether_vel[2]
+    sys.tether_vel[3]
+]
 lin_x_vec = [
     sys.heading
     sys.turn_rate[3]
@@ -208,7 +210,7 @@ function linearize!(s::RamAirKite, A, B, C, D)
     # calculate jacobian
     A .= jacobian(f_x, lin_x0, fill(0.1, nx))
     B .= jacobian(f_u, lin_u0, fill(0.1, 3))
-    C .= jacobian(h,   lin_x0, fill(0.1, ny))
+    C .= jacobian(h,   lin_x0, fill(0.1, nx))
 
     nothing
 end
