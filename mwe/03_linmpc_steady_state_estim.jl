@@ -52,7 +52,7 @@ measured_states = @variables begin
     azimuth(t)
     azimuth_vel(t)
     heading(t)
-    turn_rate(t)[1]
+    turn_rate(t)[3]
     tether_length(t)[1:3]
     tether_vel(t)[1:3]
 end
@@ -94,7 +94,7 @@ function set_y!(p::ModelParams, y)
     # get kite_pos, rotate it by elevation and azimuth around the x and z axis
     kite_pos = R_t_w * [0, 0, distance]
     # kite_vel from elevation_vel and azimuth_vel
-    kite_vel = R_t_w * [-elevation_vel, azimuth_vel, 0]
+    kite_vel = R_t_w * [-elevation_vel, azimuth_vel, tether_vel[1]]
     # find quaternion orientation from heading, R_cad_body and R_t_w
     x = [cos(-heading), -sin(-heading), 0]
     y = [sin(-heading),  cos(-heading), 0]
