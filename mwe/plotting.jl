@@ -4,7 +4,7 @@
 
 using RecipesBase
 
-function Plots.plot(s::RamAirKite; kwargs...)
+function Plots.plot(s::SymbolicAWEModel; kwargs...)
     pos = s.integrator[s.sys.pos]
     kite_pos = s.integrator[s.sys.kite_pos]
     for (i, point) in enumerate(s.point_system.points)

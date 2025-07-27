@@ -58,7 +58,7 @@ set.quasi_static = true
 set.physical_model = "ram"
 
 @info "Creating wing, aero, vsm_solver, point_system and s:"
-s = RamAirKite(set)
+s = SymbolicAWEModel(set)
 s.set.abs_tol = 1e-3
 s.set.rel_tol = 1e-3
 toc()

@@ -25,8 +25,8 @@ u_idxs = [1,2,3]
 # Initialize model
 set_model = deepcopy(load_settings("system_model.yaml"))
 set_plant = deepcopy(load_settings("system_plant.yaml"))
-s_model = RamAirKite(set_model)
-s_plant = RamAirKite(set_plant)
+s_model = SymbolicAWEModel(set_model)
+s_plant = SymbolicAWEModel(set_plant)
 dt = 1/set_model.sample_freq
 
 measure = Measurement()
@@ -82,7 +82,7 @@ end
 
 # Get initial state
 struct ModelParams{G1,G2,G3}
-    s::RamAirKite
+    s::SymbolicAWEModel
     integ::OrdinaryDiffEq.ODEIntegrator
     set_x::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}
     set_ix::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}

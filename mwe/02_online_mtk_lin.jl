@@ -29,8 +29,8 @@ set_model = deepcopy(load_settings("system_model.yaml"))
 set_plant = deepcopy(load_settings("system_plant.yaml"))
 set_model.quasi_static = false
 set_plant.quasi_static = false
-s_model = RamAirKite(set_model)
-s_plant = RamAirKite(set_plant)
+s_model = SymbolicAWEModel(set_model)
+s_plant = SymbolicAWEModel(set_plant)
 dt = 1/set_model.sample_freq
 
 measure = Measurement()

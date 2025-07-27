@@ -27,7 +27,7 @@ wing = RamAirWing(set; prn=false, n_groups=length(set.bridle_fracs))
 aero = BodyAerodynamics([wing])
 vsm_solver = Solver(aero; solver_type=NONLIN, atol=2e-8, rtol=2e-8)
 point_system = PointMassSystem(set, wing)
-s = RamAirKite(set, aero, vsm_solver, point_system)
+s = SymbolicAWEModel(set, aero, vsm_solver, point_system)
 
 measure = Measurement()
 s.set.abs_tol = 1e-5

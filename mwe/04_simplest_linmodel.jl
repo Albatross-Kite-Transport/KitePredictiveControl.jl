@@ -49,7 +49,7 @@ set_model = deepcopy(load_settings("system_model.yaml"))
 set_plant = deepcopy(load_settings("system_plant.yaml"))
 set_model.quasi_static = false
 set_plant.quasi_static = false
-ram_model = RamAirKite(set_model)
+ram_model = SymbolicAWEModel(set_model)
 
 KiteModels.init_sim!(ram_model; remake=false, adaptive=true)
 find_steady_state!(ram_model)
@@ -117,7 +117,7 @@ function calc_steady_τ(wm::TorqueControlledMachine, winch_force, tether_vel)
     return steady_τ
 end
 
-function set_measured!(s::RamAirKite, x)
+function set_measured!(s::SymbolicAWEModel, x)
     # get variables from y
     elevation       = x[1]
     elevation_vel   = x[2]
@@ -161,20 +161,20 @@ set_x = setu(integ, unknowns(sys))
 get_x = getu(integ, unknowns(sys))
 x0 = get_x(integ)
 
-function jacobian(f, x, abssteps)
+function jacobian(f::Function, x::AbstractVector, ϵ::AbstractVector)
     n = length(x)
     fx = f(x)
     m = length(fx)
     J = zeros(m, n)
     for i in 1:n
         x_perturbed = copy(x)
-        x_perturbed[i] += abssteps[i]
-        J[:, i] = (f(x_perturbed) - fx) / abssteps[i]
+        x_perturbed[i] += ϵ[i]
+        J[:, i] = (f(x_perturbed) - fx) / ϵ[i]
     end
     return J
 end
 
-function linearize!(s::RamAirKite, A, B, C, D)
+function linearize!(s::SymbolicAWEModel, A, B, C, D)
     integ = s.integrator
     lin_x0 = get_y(integ)[5:12]
     lin_u0 = get_u(integ)
@@ -208,9 +208,11 @@ function linearize!(s::RamAirKite, A, B, C, D)
     f_u(u) = f(lin_x0, u)
 
     # calculate jacobian
-    A .= jacobian(f_x, lin_x0, fill(0.1, nx))
-    B .= jacobian(f_u, lin_u0, fill(0.1, 3))
-    C .= jacobian(h,   lin_x0, fill(0.1, nx))
+    ϵ_x = [0.01, 0.01, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    ϵ_u = [1.0, 0.1, 0.1]
+    A .= jacobian(f_x, lin_x0, ϵ_x)
+    B .= jacobian(f_u, lin_u0, ϵ_u)
+    C .= jacobian(h,   lin_x0, ϵ_x)
 
     nothing
 end
@@ -224,3 +226,15 @@ D = zeros(ny, 3)
 
 linsys = ss(A,B,C,D)
 nothing
+
+
+# julia> A
+# 8×8 Matrix{Float64}:
+#     0.000814894    1.00014         2.13609e-6      4.23583e-5    -4.27542e-5      2.37988e-7      3.76856e-10     1.79523e-11
+#  -718.555        -53.0095         -8.8696         48.8487       -57.6373          0.0644731       1.92147e-6      9.18072e-8
+#     0.0            0.0             0.0             0.0            0.0             1.0             0.0             0.0
+#     0.0            0.0             0.0             0.0            0.0             0.0             1.0             0.0
+#     4.44089e-14    6.93889e-15    -1.80411e-14    -4.57967e-15   -2.91434e-15     1.66533e-15    -8.32667e-16     1.0
+#   -17.4877        -0.225774     -799.764          10.9828        10.644        -105.302           7.31719e-6      3.49831e-7
+#   -50.9999         3.85377        19.3347       -100.288         20.0782          1.34941      -107.57            1.69535e-8
+#    55.2985        -3.93163        21.6658         20.3021       -99.8842          1.35809         2.62089e-7   -101.663

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 struct ModelParams{G1,G2,G3}
-    s::RamAirKite
+    s::SymbolicAWEModel
     integ::OrdinaryDiffEq.ODEIntegrator
     set_x::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}
     set_ix::Union{SymbolicIndexingInterface.MultipleSetters, Nothing}

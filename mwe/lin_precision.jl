@@ -17,10 +17,10 @@ steps = Int(round(total_time / dt))
 set_data_path(joinpath(@__DIR__, "../data"))
 set_model = deepcopy(se("system_model.yaml"))
 dt = 1/set_model.sample_freq
-s = RamAirKite(set_model)
+s = SymbolicAWEModel(set_model)
 
 set_plant = deepcopy(se("system_plant.yaml"))
-s_plant = RamAirKite(set_plant)
+s_plant = SymbolicAWEModel(set_plant)
 
 # Create models (nonlinear and plant)
 measure = Measurement()

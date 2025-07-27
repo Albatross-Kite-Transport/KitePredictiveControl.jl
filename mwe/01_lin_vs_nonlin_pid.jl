@@ -4,7 +4,7 @@
 
 #=
 This example demonstrates linearized model accuracy by comparing:
-1. Nonlinear RamAirKite model simulation 
+1. Nonlinear SymbolicAWEModel model simulation 
 2. Linearized state-space model simulation, one timestep at a time within the loop
 
 Both models start from the same operating point and are subjected
@@ -49,8 +49,8 @@ set_values = [-60.0, 0.0, 0.0]  # Set values of the torques of the three winches
 set.quasi_static = true
 set.physical_model = "ram"
 
-@info "Creating RamAirKite model..."
-s = RamAirKite(set)
+@info "Creating SymbolicAWEModel model..."
+s = SymbolicAWEModel(set)
 toc()
 
 measure = Measurement()
