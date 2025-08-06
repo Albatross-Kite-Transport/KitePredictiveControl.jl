@@ -5,17 +5,15 @@
 module KitePredictiveControl
 
 using Plots
-using KiteModels, KiteUtils, LinearAlgebra
+using SymbolicAWEModels, KiteUtils, LinearAlgebra
 using ModelPredictiveControl, ModelingToolkit, OrdinaryDiffEq,
     SymbolicIndexingInterface
 using ModelingToolkit: setu, setp, getu, getp, @variables
 using ModelingToolkit: t_nounits as t
-using KiteModels: rotation_matrix_to_quaternion
 using SciMLBase: successful_retcode
 using RobustAndOptimalControl
 using ControlSystems
 using Printf
-import KiteModels: SystemStructure
 
 export linearize
 
@@ -26,15 +24,6 @@ function sim!(s::SymbolicAWEModel, p::ModelParams)
     N = Int(round(time÷dt))
     vsm_interval = Int(round(vsm_dt÷dt))
     plot_interval = Int(round(plot_dt÷dt))
-end
-
-function linearize(s::SymbolicAWEModel)
-    KiteModels.init_sim!(s; remake=false, adaptive=true)
-    find_steady_state!(s)
-    s.set_stabilize(s.integrator, true)
-    p = ModelParams(s)
-    @time linearize!(s, p, A, B, C, D)
-    return p
 end
 
 function set_measured!(s::SymbolicAWEModel, p::ModelParams, x)
