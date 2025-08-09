@@ -14,7 +14,7 @@ function generate_f_h(model, inputs, outputs)
     (h_oop, h_ip) = ModelingToolkit.build_explicit_observed_function(
         io_sys, outputs; inputs, return_inplace = true, eval_expression=true
     )
-    return f_oop, f_ip, h_oop, h_ip, nu, nx, ny, psym
+    return f_oop, f_ip, h_oop, h_ip, nu, nx, ny, psym, io_sys
 end
 
 set = Settings("system.yaml")
@@ -23,8 +23,8 @@ init!(simple_sam)
 full_sys = complete(simple_sam.full_sys)
 
 inputs, outputs = [full_sys.set_values...], [simple_sam.full_sys.heading[1]]
-@time f_oop, f_ip, h_oop, h_ip, nu, nx, ny, psym = generate_f_h(full_sys, inputs, outputs)
-p = simple_sam.integrator.ps[psym]
+@time f_oop, f_ip, h_oop, h_ip, nu, nx, ny, psym, io_sys = generate_f_h(full_sys, inputs, outputs)
+p = ModelingToolkit.get_p(io_sys, [])
 @show typeof.(p)
 f_ip(zeros(nx), zeros(nx), zeros(nu), p, 0.0)
 f_oop(zeros(nx), zeros(nu), p, 0.0)
