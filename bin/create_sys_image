@@ -1,10 +1,138 @@
 #!/bin/bash -eu
-# SPDX-FileCopyrightText: 2025 Bart van de Lint
-# SPDX-License-Identifier: MPL-2.0
+# SPDX-FileCopyrightText: 2025 Uwe Fechner
+# SPDX-License-Identifier: MIT
 
-julia --project=. -e '
-using Pkg
-Pkg.update()
-using PackageCompiler
-PackageCompiler.create_sysimage(:KitePredictiveControl, sysimage_path="bin/kitepredictivecontrol.so")
+# This script creates a Julia system image for the project, optionally
+# updating packages first.
+
+# --- 1. Argument Parsing & Version Setup ---
+update=false
+julia_channel_arg=""
+
+# Use a while loop to handle arguments that take values
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --update)
+      update=true
+      shift # consume --update
+      ;;
+    --version)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --version requires a version argument." >&2
+        exit 1
+      fi
+      # Construct the +<version> argument for juliaup
+      julia_channel_arg="+$2"
+      shift 2 # consume --version and its value
+      ;;
+    +*)
+      # Handle the +<version> format directly
+      julia_channel_arg="$1"
+      shift # consume +<version>
+      ;;
+    *)
+      # Unknown argument, shift and ignore
+      shift
+      ;;
+  esac
+done
+
+# Determine the Julia major version from the argument or the default installation
+if [[ -n "$julia_channel_arg" ]]; then
+    julia_major="${julia_channel_arg#+}"
+else
+    julia_major=$(julia --version | cut -d' ' -f3 | cut -d'.' -f1,2)
+fi
+
+# Construct the Julia command, including the version specifier if provided
+JULIA_CMD="julia"
+if [[ -n "$julia_channel_arg" ]]; then
+    JULIA_CMD="julia $julia_channel_arg"
+fi
+echo "--- Targeting Julia v${julia_major} ---"
+
+# --- 2. Prepare Environment ---
+# Ensure the script runs from the project root
+if [[ $(basename "$(pwd)") == "bin" ]]; then
+    cd ..
+fi
+
+# Check for juliaup
+if ! command -v juliaup &> /dev/null; then
+    echo "Error: Please install the Julia installer 'juliaup'!"
+    echo "See: https://github.com/JuliaLang/juliaup"
+    exit 1
+fi
+
+# Disable user precompilation preferences to ensure a clean build
+if test -f "LocalPreferences.toml"; then
+    mv LocalPreferences.toml LocalPreferences.toml.bak
+fi
+cp LocalPreferences.toml.default LocalPreferences.toml
+
+# Check available memory to set thread count for compilation
+totalmem=$(grep MemTotal /proc/meminfo | awk '{printf "%i", $2 / 1024}')
+if [[ $totalmem -lt 27000 ]]; then
+    echo "Warning: Less than 27GB of memory detected. Using only one thread for sysimage compilation."
+    export JULIA_IMAGE_THREADS=1
+fi
+
+# --- 3. Update or Instantiate Packages ---
+if [ "$update" = true ]; then
+    echo "--- Updating packages via external script ---"
+    ./bin/update_manifest "$julia_channel_arg" --default
+else
+    echo "--- Instantiating packages from default manifest ---"
+    MANIFEST_DEFAULT="Manifest-v${julia_major}.toml.default"
+    if [ ! -f "$MANIFEST_DEFAULT" ]; then
+        echo "Error: Default manifest '$MANIFEST_DEFAULT' not found!"
+        echo "Please run with '--update' first to create it."
+        exit 1
+    fi
+    cp "$MANIFEST_DEFAULT" "Manifest.toml"
+    echo "Using $MANIFEST_DEFAULT..."
+    # shellcheck disable=SC2086
+    $JULIA_CMD --startup-file=no --project -e "using Pkg; Pkg.instantiate();"
+fi
+
+# --- 4. Create System Image ---
+echo "--- Creating system image ---"
+rm -f "data/model_${julia_major}_*.bin" "data/model_${julia_major}_*.bin.xz"
+
+# Run the Julia script that builds the system image
+$JULIA_CMD --startup-file=no --project -e "using TestEnv; TestEnv.activate(); include(\"test/create_sys_image.jl\");"
+
+# Determine final system image path
+branch=""
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    branch=$(git rev-parse --abbrev-ref HEAD | sed 's/\//-/g')
+fi
+SOFILE="bin/kps-image-${julia_major}.so"
+if [[ -n "$branch" ]]; then
+    SOFILE="bin/kps-image-${julia_major}-${branch}.so"
+fi
+
+# Move the newly created image to its final destination
+mv -f kps-image_tmp.so "$SOFILE"
+echo "System image created at $SOFILE"
+
+# --- 5. Precompile Project with New Image ---
+echo "--- Precompiling project with new system image ---"
+# Touch source files to ensure they are recompiled
+if [ -d src ]; then
+    touch src/*.jl
+fi
+# Run precompilation for all required packages
+$JULIA_CMD --startup-file=no --project -J "$SOFILE" -e '
+    using SymbolicAWEModels, KiteUtils, ControlPlots, VortexStepMethod
+    using TestEnv; TestEnv.activate(); using ControlPlots
 '
+
+# --- 6. Restore Environment ---
+if test -f "LocalPreferences.toml.bak"; then
+    mv LocalPreferences.toml.bak LocalPreferences.toml
+else
+    rm LocalPreferences.toml
+fi
+
+echo "✅ System image creation and precompilation complete!"

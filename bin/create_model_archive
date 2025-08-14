@@ -1,0 +1,18 @@
+#!/bin/bash -eu
+# SPDX-FileCopyrightText: 2025 Bart van de Lint
+# SPDX-License-Identifier: MPL-2.0
+
+# This script creates a compressed model file for a specific Julia version.
+#
+# Usage:
+#   ./create_xz.sh          # Uses the default Julia version
+#   ./create_xz.sh +1.11    # Uses Julia v1.11
+
+# Ensure the script runs from the project root
+if [[ $(basename "$(pwd)") == "bin" ]]; then
+    cd ..
+fi
+
+export SAM_PRECOMPILE=false
+./bin/update_manifest "$@" --default
+./bin/run_julia "$@" -e 'include("scripts/create_model_archive.jl")'
