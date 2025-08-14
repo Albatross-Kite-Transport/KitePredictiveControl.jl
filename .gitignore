@@ -1,4 +1,5 @@
 Manifest.toml
+.helix
 *.jlprof
 *.jld2
 *.bin
