@@ -17,6 +17,8 @@ import ModelingToolkit: t_nounits as t
     free_twist_angle(t)[1:2]
 
     heading(t)[1]
+    elevation(t)[1]
+    azimuth(t)[1]
     winch_force(t)[1:3]
     angle_of_attack(t)[1]
 end
@@ -51,7 +53,7 @@ sam = SymbolicAWEModel(set, "ram")
 init!(sam; outputs)
 
 plant_set = Settings("system.yaml")
-plant_sam = SymbolicAWEModel(plant_set, "simple_ram")
+plant_sam = SymbolicAWEModel(plant_set, "ram")
 init!(plant_sam; outputs)
 
 tether_set = Settings("system.yaml")
@@ -109,42 +111,100 @@ f!, h!, p, nu, nx, ny, vx = generate_f_h(simple_sam)
 vu = ["τ[1]", "τ[2]", "τ[3]"]
 vy = string.(outputs)
 Ts = 1/set.sample_freq
-model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p); u=vu, x=vx, y=vy)
-man_estim = ManualEstimator(model)
+solver = RungeKutta(4; supersample=10)
+model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p, solver); u=vu, x=vx, y=vy)
+man_estim = ManualEstimator(model; nint_u=0, nint_ym=0)
+res = ModelPredictiveControl.sim!(model, 100)
 
-Hp, Hc = 20, 2
+struct SAMEstim{GetterType}
+    sam::SymbolicAWEModel
+    simple_sam::SymbolicAWEModel
+    tether_sam::SymbolicAWEModel
+    get_x::GetterType
+    function SAMEstim(sam, simple_sam, tether_sam)
+        get_x = ModelingToolkit.getu(simple_sam.integrator, simple_sam.control_funcs.dvs)
+        new{typeof(get_x)}(sam, simple_sam, tether_sam, get_x)
+    end
+end
+
+function preparestate!(estim::SAMEstim, y::Vector{<:Real})
+    @unpack sam, simple_sam, tether_sam, get_x = estim
+
+    # update sam with y
+    sam.sys_struct.transforms[1].heading = y[1]
+    sam.sys_struct.transforms[1].elevation = y[2]
+    sam.sys_struct.transforms[1].azimuth = y[3]
+    SymbolicAWEModels.reposition!(sam.sys_struct.transforms, sam.sys_struct)
+    i = 4
+    for winch in sam.sys_struct.winches
+        winch.tether_len = y[i]
+        i += 1
+    end
+    for winch in sam.sys_struct.winches
+        winch.tether_vel = y[i]
+        i += 1
+    end
+    @assert i-1 == length(y)
+
+    # copy sam to simple sam
+    copy_to_simple!(sam, tether_sam, simple_sam; prn=false)
+
+    return get_x(simple_sam.integrator)
+end
+
+function updatestate!(estim::SAMEstim, u::Vector{<:Real}, y::Vector{<:Real})
+    sam = estim.sam
+    next_step!(sam; set_values=u)
+    nothing
+end
+
+function updatestate!(sam::SymbolicAWEModel, u::Vector{<:Real})
+    next_step!(sam; set_values=u)
+    nothing
+end
+
+estim = SAMEstim(sam, simple_sam, tether_sam)
+
+Hp, Hc = 10, 2
 Mwt = zeros(ny)
-Mwt[1:3] .= 1.0
+Mwt[1] = 1.0
 Nwt = fill(0.1, nu)
 mpc = NonLinMPC(man_estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 umin = fill(-100, 3)
 umax = fill(100, 3)
 mpc = setconstraint!(mpc; umin, umax)
 
-function man_sim!(mpc, N, ry, y0, u0)
+function man_sim!(mpc, N, ry, y0, u0, x0)
     U_data, Y_data, Ry_data = zeros(nu, N), zeros(ny, N), zeros(ny, N)
-    initstate!(estim, u0, y0)
+    # initstate!(estim, u0, y0)
+    setstate!(mpc, x0)
     for i = 1:N
-        y = plant_sam.simple_model.get_y(sam.integrator)
+        @show i
+        y = plant_sam.simple_lin_model.get_y(sam.integrator)
         # during preparestate:
         # use reposition! on complex model, update tether len/vel and tune the simple model
-        x̂ = preparestate!(estim, y)
+        @time x̂ = preparestate!(estim, y)
         ŷ = y # TODO: add a kalman filter to remove noise from y and improve ŷ.
               # this kalman filter should be added inside the custom estim, before
               # running reposition!
-        setstate!(mpc, x̂)
-        u = moveinput!(mpc, ry)
+        @time setstate!(mpc, x̂)
+        @time u = moveinput!(mpc, ry)
         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
         # during updatestate, step with
-        updatestate!(estim, u, y) # in the estim: step the complex model
-        updatestate!(sam, u)  # update plant simulator
+        ModelPredictiveControl.updatestate!
+        @time updatestate!(estim, u, y) # in the estim: step the complex model
+        updatestate!(plant_sam, u)  # update plant simulator
     end
     res = SimResult(mpc, U_data, Y_data; Ry_data)
     return res
 end
 
 
-y0 = sam.simple_model.get_y(sam.integrator)
+y0 = sam.simple_lin_model.get_y(sam.integrator)
+x0 = estim.get_x(estim.simple_sam.integrator)
 @show y0
+ry = copy(y0)
+ry[1] += deg2rad(10)
 u0 = sam.prob.get_set_values(sam.integrator)
-man_sim!(mpc, 10, y0, y0, u0)
+res = man_sim!(mpc, 100, ry, y0, u0, x0)
+plot(res; ploty=[1,2,3])
