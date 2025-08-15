@@ -20,32 +20,39 @@ import ModelingToolkit: t_nounits as t
     winch_force(t)[1:3]
     angle_of_attack(t)[1]
 end
-outputs = [
-    # copy of state for observability
-    collect(wing_vel[1,:])...,
-    collect(wing_pos[1,:])...,
-    collect(ω_b[1,:])...,
-    collect(Q_b_w[1,:])...,
-    tether_vel...,
-    tether_len...,
-    twist_ω...,
-    free_twist_angle...,
+# outputs = [
+#     # stuff we want to control
+#     heading[1],
+#     winch_force[1],
+#     angle_of_attack[1],
 
-    # stuff we want to control
+#     # copy of state for observability
+#     collect(wing_pos[1,:])...,
+#     collect(wing_vel[1,:])...,
+#     collect(Q_b_w[1,:])...,
+#     collect(ω_b[1,:])...,
+#     tether_len...,
+#     tether_vel...,
+#     free_twist_angle...,
+#     twist_ω...,
+# ]
+outputs = [
     heading[1],
-    winch_force...,
-    angle_of_attack[1],
+    elevation[1],
+    azimuth[1],
+    tether_len...,
+    tether_vel...,
 ]
-@info "Linear outputs: $outputs"
+@info "Outputs: $outputs"
 
 set = Settings("system.yaml")
 dt = 1/set.sample_freq
 sam = SymbolicAWEModel(set, "ram")
 init!(sam; outputs)
 
-simple_plant_set = Settings("system.yaml")
-simple_plant_sam = SymbolicAWEModel(simple_plant_set, "simple_ram")
-init!(simple_plant_sam; outputs)
+plant_set = Settings("system.yaml")
+plant_sam = SymbolicAWEModel(plant_set, "simple_ram")
+init!(plant_sam; outputs)
 
 tether_set = Settings("system.yaml")
 tether_sam = SymbolicAWEModel(tether_set, "tether")
@@ -56,66 +63,88 @@ simple_sam = SymbolicAWEModel(simple_set, "simple_ram")
 init!(simple_sam; outputs, create_control_func=true)
 
 copy_to_simple!(sam, tether_sam, simple_sam; prn=false)
-copy_to_simple!(sam, tether_sam, simple_plant_sam; prn=false)
 
-function linearize(simple_sam)
-    # Set y to sam, copy sam to simple_sam, linearize simple sam
-    # TODO: set y to sam
-    u = -simple_sam.set.drum_radius .*
-        [norm(winch.force) for winch in simple_sam.sys_struct.winches]
-    statespace = SymbolicAWEModels.linearize!(simple_sam)
-    statespace = ControlSystems.ss(statespace...)
-    statespace = c2d(statespace, dt)
-    @unpack nx, ny, nu = statespace
-    Bd = zeros(nx, 0)
-    Dd = zeros(ny, 0)
-    A = statespace.A
-    Bu = statespace.B
-    C = statespace.C
-    @assert norm(statespace.D) ≈ 0
-    linmodel = setname!(LinModel{Float64}(A, Bu, C, Bd, Dd, dt),
-                        x=string.(unknowns(simple_sam.prob.sys)), y=string.(outputs))
-
-    # --- compute the nonlinear model output at operating points ---
-    y = simple_sam.simple_lin_model.get_y(simple_sam.integrator)
-    # --- modify the linear model operating points ---
-    linmodel.uop .= u
-    linmodel.yop .= y
-    linmodel.xop .= simple_sam.integrator.u
-    # --- compute the nonlinear model next state at operating points ---
-    next_step!(simple_sam; set_values=u)
-    linmodel.fop .= simple_sam.integrator.u # TODO: investigate for sudden jump in x
-    # --- reset the state of the linear model ---
-    linmodel.x0 .= 0 # state deviation vector is always x0=0 after a linearization
-    return linmodel
+function generate_f_h(simple_sam)
+    @unpack io_sys, dvs, nx, nu, ny, f_ip, h_ip = simple_sam.control_funcs
+    p = ModelingToolkit.get_p(io_sys, [])
+    p[3][1] = simple_sam.sys_struct
+    p[4][1] = simple_sam.set
+    if any(ModelingToolkit.is_alg_equation, equations(io_sys))
+        error("Systems with algebraic equations are not supported")
+    end
+    vx = string.(dvs)
+    function f!(ẋ, x, u, _ , p)
+        try
+            f_ip(ẋ, x, u, p, nothing)
+        catch err
+            if err isa MethodError
+                error("NonLinModel does not support a time argument t in the f function, "*
+                      "see the constructor docstring for a workaround.")
+            else
+                rethrow()
+            end
+        end
+        return nothing
+    end
+    u_nothing = fill(nothing, nu)
+    function h!(y, x, _ , p)
+        try
+            # MTK.jl supports a `u` argument in `h_ip` function but not this package. We set
+            # `u` as a vector of nothing and `h_ip` function will presumably throw an
+            # MethodError it this argument is used inside the function
+            h_ip(y, x, u_nothing, p, nothing)
+        catch err
+            if err isa MethodError
+                error("NonLinModel only support strictly proper systems (no manipulated "*
+                      "input argument u in the output function h)")
+            else
+                rethrow()
+            end
+        end
+        return nothing
+    end
+    return f!, h!, p, nu, nx, ny, vx
 end
-
-@time linmodel = linearize(simple_sam)
-nx, ny, nu = linmodel.nx, linmodel.ny, linmodel.nu
-# α=0.01; σQ=[0.1, 1.0]; σR=[5.0]; nint_u=[1]; σQint_u=[0.1]
-estim = KalmanFilter(linmodel)
+f!, h!, p, nu, nx, ny, vx = generate_f_h(simple_sam)
+vu = ["τ[1]", "τ[2]", "τ[3]"]
+vy = string.(outputs)
+Ts = 1/set.sample_freq
+model = setname!(NonLinModel(f!, h!, Ts, nu, nx, ny; p); u=vu, x=vx, y=vy)
+man_estim = ManualEstimator(model)
 
 Hp, Hc = 20, 2
-# Mwt, Nwt = [0.5], [2.5]
-mpc = LinMPC(estim; Hp, Hc, Cwt=Inf)
+Mwt = zeros(ny)
+Mwt[1:3] .= 1.0
+Nwt = fill(0.1, nu)
+mpc = NonLinMPC(man_estim; Hp, Hc, Mwt, Nwt, Cwt=Inf)
 umin = fill(-100, 3)
 umax = fill(100, 3)
 mpc = setconstraint!(mpc; umin, umax)
 
-# function sim_adapt!(mpc, N, ry, x_0, x̂_0, y_step=zeros(ny))
-#     U_data, Y_data, Ry_data = zeros(nu, N), zeros(ny, N), zeros(ny, N)
-#     initstate!(mpc, [0], sam.simple_lin_model.get_y(sam.integrator))
-#     setstate!(mpc, x̂_0)
-#     for i = 1:N
-#         y = sam.simple_model.get_y(sam.integrator) + y_step
-#         x̂ = preparestate!(mpc, y)
-#         u = moveinput!(mpc, ry)
-#         # linmodel = linearize!(simple_sam, x̂)
-#         # setmodel!(mpc, linmodel)
-#         U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
-#         updatestate!(mpc, u, y) # update mpc state estimate
-#         next_step!(sam; set_values=u)  # update plant simulator
-#     end
-#     res = SimResult(mpc, U_data, Y_data; Ry_data)
-#     return res
-# end
+function man_sim!(mpc, N, ry, y0, u0)
+    U_data, Y_data, Ry_data = zeros(nu, N), zeros(ny, N), zeros(ny, N)
+    initstate!(estim, u0, y0)
+    for i = 1:N
+        y = plant_sam.simple_model.get_y(sam.integrator)
+        # during preparestate:
+        # use reposition! on complex model, update tether len/vel and tune the simple model
+        x̂ = preparestate!(estim, y)
+        ŷ = y # TODO: add a kalman filter to remove noise from y and improve ŷ.
+              # this kalman filter should be added inside the custom estim, before
+              # running reposition!
+        setstate!(mpc, x̂)
+        u = moveinput!(mpc, ry)
+        U_data[:,i], Y_data[:,i], Ry_data[:,i] = u, y, ry
+        # during updatestate, step with
+        updatestate!(estim, u, y) # in the estim: step the complex model
+        updatestate!(sam, u)  # update plant simulator
+    end
+    res = SimResult(mpc, U_data, Y_data; Ry_data)
+    return res
+end
+
+
+y0 = sam.simple_model.get_y(sam.integrator)
+@show y0
+u0 = sam.prob.get_set_values(sam.integrator)
+man_sim!(mpc, 10, y0, y0, u0)
